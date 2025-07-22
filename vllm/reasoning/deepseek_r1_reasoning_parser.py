@@ -185,7 +185,7 @@ class MistralReasoningParser(DeepSeekR1ReasoningParser):
             raise ValueError(
                 "The tokenizer must be an instance of MistralTokenizer.")
 
-        ReasoningParser().__init__(self, tokenizer)
+        ReasoningParser.__init__(self, tokenizer)
 
         if not self.model_tokenizer:
             raise ValueError(
