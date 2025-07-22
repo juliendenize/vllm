@@ -6,7 +6,10 @@ from collections.abc import Mapping
 from typing import Literal, Optional
 
 import pytest
-from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+from mistral_common.tokens.tokenizers.base import (SpecialTokenPolicy,
+                                                   SpecialTokens)
+from mistral_common.tokens.tokenizers.tekken import (SpecialTokenInfo,
+                                                     Tekkenizer)
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -1499,7 +1502,22 @@ def test_apply_mistral_chat_template_thinking_chunk():
     }]
 
     mistral_tokenizer = MistralTokenizer.from_pretrained(
-        "mistralai/Magistral-Small-2507")
+        "mistralai/Magistral-Small-2506")
+
+    assert isinstance(mistral_tokenizer.tokenizer, Tekkenizer)
+    # Add think special tokens to the tokenizer
+    mistral_tokenizer.tokenizer._all_special_tokens[34] = SpecialTokenInfo(
+        SpecialTokenInfo(rank=34,
+                         is_control=True,
+                         token_str=SpecialTokens.begin_think.value))
+    mistral_tokenizer.tokenizer._all_special_tokens[35] = SpecialTokenInfo(
+        SpecialTokenInfo(rank=35,
+                         is_control=True,
+                         token_str=SpecialTokens.end_think.value))
+    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
+        SpecialTokens.begin_think.value] = 34
+    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
+        SpecialTokens.end_think.value] = 35
 
     tokens_ids = apply_mistral_chat_template(mistral_tokenizer,
                                              messages,
