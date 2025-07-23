@@ -177,7 +177,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
 @ReasoningParserManager.register_module("mistral")
 class MistralReasoningParser(DeepSeekR1ReasoningParser):
     """
-    Reasoning parser for DeepSeek R1 Mistral model.
+    Reasoning parser for Mistral model.
     """
 
     def __init__(self, tokenizer: MistralTokenizer):
