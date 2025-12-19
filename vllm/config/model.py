@@ -2141,6 +2141,8 @@ def _get_and_verify_max_len(
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
+    max_model_len = max_model_len or getattr(hf_config, "max_model_len", None)
+
     # If the user didn't specify `max_model_len`, then use that derived from
     # the model config as a default value.
     if max_model_len is None:

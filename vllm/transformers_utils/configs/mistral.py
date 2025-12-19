@@ -148,6 +148,10 @@ def _remap_general_mistral_args(config: dict) -> dict:
         "hidden_act": ("activation", "silu"),
         "tie_word_embeddings": ("tied_embeddings", False),
         "max_seq_len": ("max_seq_len", config.get("max_position_embeddings", 128_000)),
+        "max_model_len": (
+            "max_model_len",
+            config.get("max_position_embeddings", 128_000),
+        ),
         "max_position_embeddings": ("max_position_embeddings", 128_000),
     }
 
