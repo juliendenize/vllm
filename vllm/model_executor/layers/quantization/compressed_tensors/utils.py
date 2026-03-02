@@ -5,6 +5,7 @@ from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 
 import regex as re
+import torch
 from compressed_tensors import CompressionFormat
 from torch.nn import Module
 
@@ -214,3 +215,70 @@ def _match_fused_layer(
             unfused_matches.append(None)
 
     return unfused_matches[0] if all(unfused_matches) else None
+
+
+class FloatArgs:
+    exponent: int
+    mantissa: int
+    bits: int | None = None
+    max: float | None = None
+    min: float | None = None
+    dtype: torch.dtype | None = None
+
+
+class FP4_E2M1_DATA(FloatArgs):
+    exponent = 2
+    mantissa = 1
+    bits = 4
+    max = 6.0
+    min = -6.0
+
+
+class FP8_E4M3_DATA(FloatArgs):
+    exponent = 4
+    mantissa = 3
+    bits = 8
+    max = torch.finfo(torch.float8_e4m3fn).max
+    min = torch.finfo(torch.float8_e4m3fn).min
+    dtype = torch.float8_e4m3fn
+
+
+class Observer:
+    def __init__(self):
+        self.past_global_min_vals = None
+        self.past_global_max_vals = None
+
+    def get_global_scale(self, observed: torch.Tensor):
+        min_vals = torch.min(observed)
+        max_vals = torch.max(observed)
+
+        if self.past_global_min_vals is not None:
+            min_vals = torch.min(min_vals, self.past_global_min_vals)
+            max_vals = torch.max(max_vals, self.past_global_max_vals)
+
+        self.past_global_min_vals = min_vals
+        self.past_global_max_vals = max_vals
+
+        return self.generate_gparam(min_vals, max_vals)
+
+    def generate_gparam(
+        self,
+        updated_min_val: torch.Tensor,
+        updated_max_val: torch.Tensor,
+        scale_data: FloatArgs | None = FP8_E4M3_DATA,
+        quant_data: FloatArgs | None = FP4_E2M1_DATA,
+        dtype: torch.dtype | None = torch.float32,
+    ):
+        """
+        Generate a global scale for an entire tensor (input_tensor).
+        Goal of the scale is to ensure that the quantization (local) scale
+        falls into the approproiate dtype range.
+        E.g. for NVFP4, group (local) scales are in dtype FP8. The global_scale
+        attempts to use the entire FP8 dtype range while mapping a per-group max
+        to the FP4 max.
+        """
+        min_vals = torch.min(updated_min_val, torch.zeros_like(updated_min_val))
+        max_vals = torch.max(updated_max_val, torch.zeros_like(updated_max_val))
+        max_val_pos = torch.max(torch.abs(min_vals), torch.abs(max_vals))
+        global_scale = scale_data.max * quant_data.max / max_val_pos
+        return global_scale.to(dtype).reshape([1])

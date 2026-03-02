@@ -59,6 +59,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import Observer
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
@@ -177,6 +178,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f"but got format: {CompressionFormat.pack_quantized.value} "
                     f" and bits: {weight_quant.num_bits}",
                 )
+
+            return CompressedTensorsW4A4Nvfp4MoEMethod(
+                layer.moe_config, layer_name, use_a16=True
+            )
 
             # Prefer to use the MarlinMoE kernel when it is supported.
             if (
@@ -384,6 +389,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             activation_key=None if use_a16 else kNvfp4Dynamic,
         )
 
+        self.nvfp4_backend = NvFp4MoeBackend.MARLIN
+
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
@@ -483,7 +490,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
         # Input Global Scales
         w13_input_scale = torch.nn.Parameter(
-            torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            torch.ones(num_experts, w13_num_shards, dtype=torch.float32),
             requires_grad=False,
         )
         layer.register_parameter("w13_input_global_scale", w13_input_scale)
@@ -492,14 +499,17 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
+        layer.w13_input_observer = [Observer() for i in range(num_experts)]
+
         w2_input_scale = torch.nn.Parameter(
-            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
+            torch.ones(num_experts, 1, dtype=torch.float32), requires_grad=False
         )
         layer.register_parameter("w2_input_global_scale", w2_input_scale)
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
+        layer.w2_input_observer = [Observer() for i in range(num_experts)]
 
     def process_weights_after_loading(self, layer: FusedMoE) -> None:
         """
@@ -667,7 +677,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         else:
             assert self.moe_mk is not None
-            return self.moe_mk(
+            result = self.moe_mk(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -679,6 +689,15 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 shared_experts_input=shared_experts_input,
             )
+            # Retrieve intermediate results stored by MarlinExperts.apply
+            # for calibration purposes (e.g., computing input scales).
+            intermediate = getattr(
+                self.moe_mk.fused_experts, "_last_intermediate", None
+            )
+            if intermediate is not None:
+                output = result[0] if isinstance(result, tuple) else result
+                return output, intermediate
+            return result
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):

@@ -83,7 +83,7 @@ def _fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
     N = marlin_moe_intermediate_size(w1, w2)
@@ -203,7 +203,7 @@ def _fused_marlin_moe(
         is_zp_float=False,
     )
 
-    return output
+    return output, intermediate_cache2
 
 
 def fused_marlin_moe(
@@ -242,7 +242,7 @@ def fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     inplace: bool = False,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
@@ -323,7 +323,7 @@ def fused_marlin_moe(
     )
 
     assert activation is not None
-    moe_output = _fused_marlin_moe(
+    moe_output, intermediate_cache2 = _fused_marlin_moe(
         hidden_states=hidden_states,
         w1=w1,
         w2=w2,
@@ -358,15 +358,19 @@ def fused_marlin_moe(
         output=None,
         input_dtype=input_dtype,
         is_k_full=is_k_full,
-    ).view(-1, topk, K)
+    )
+
+    moe_output = moe_output.view(-1, topk, K)
 
     if output is None:
         output = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if moe_sum is None:
-        return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
+        return torch.sum(
+            moe_output.view(-1, topk, K), dim=1, out=output
+        ), intermediate_cache2
     else:
-        return moe_sum(moe_output, output)
+        return moe_sum(moe_output, output), intermediate_cache2
 
 
 def batched_fused_marlin_moe(
@@ -488,7 +492,7 @@ def batched_fused_marlin_moe(
     )
 
     assert activation is not None
-    output = _fused_marlin_moe(
+    output, _ = _fused_marlin_moe(
         hidden_states=hidden_states.view(-1, K),
         w1=w1,
         w2=w2,
@@ -713,7 +717,7 @@ class MarlinExperts(MarlinExpertsBase):
     ):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
-        return fused_marlin_moe(
+        true_output, intermediate_cache2 = fused_marlin_moe(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
@@ -744,6 +748,8 @@ class MarlinExperts(MarlinExpertsBase):
             is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
         )
+        # Store intermediate for calibration purposes
+        self._last_intermediate = intermediate_cache2
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)

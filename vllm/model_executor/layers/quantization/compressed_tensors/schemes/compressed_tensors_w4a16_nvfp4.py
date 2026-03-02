@@ -8,6 +8,7 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import Observer
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
     prepare_fp4_layer_for_marlin,
@@ -78,6 +79,9 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
 
         layer.register_parameter("weight_scale", weight_scale)
 
+        layer.input_global_scale = Parameter(torch.ones(1), requires_grad=False)
+        layer.input_observer = Observer()
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process parameters for marlin repacking
 
@@ -97,6 +101,9 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        input_global_scale = layer.input_observer.get_global_scale(x)
+        layer.input_global_scale.copy_(input_global_scale)
+
         return apply_fp4_marlin_linear(
             input=x,
             weight=layer.weight,

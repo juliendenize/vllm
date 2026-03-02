@@ -723,13 +723,44 @@ class DefaultMoERunner(MoERunner):
                     router_logits=router_logits,
                 )
 
-                final_hidden_states = self.quant_method.apply(
+                w13_observers = layer.w13_input_observer
+                for i in range(len(w13_observers)):
+                    observer = w13_observers[i]
+                    new_global_scale = observer.get_global_scale(hidden_states)
+                    layer.w13_input_global_scale[i, :].copy_(new_global_scale)
+
+                final_hidden_states, intermediate = self.quant_method.apply(
                     layer=layer,
                     x=x,  # The type signture of this is wrong due to the hack.
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     shared_experts_input=shared_input,
                 )
+
+                # Re-select experts with all experts (top_k=128) to get
+                # intermediates from all experts for calibration.
+                original_top_k = self.router.top_k
+                self.router.top_k = self.router.global_num_experts
+                calib_topk_weights, calib_topk_ids = self.router.select_experts(
+                    hidden_states=x_orig,
+                    router_logits=router_logits,
+                )
+                _, all_calibrate_intermediate = self.quant_method.apply(
+                    layer=layer,
+                    x=x,
+                    topk_weights=calib_topk_weights,
+                    topk_ids=calib_topk_ids,
+                    shared_experts_input=None,
+                )
+                self.router.top_k = original_top_k
+
+                w2_observers = layer.w2_input_observer
+                for i in range(len(w2_observers)):
+                    observer = w2_observers[i]
+                    new_global_scale = observer.get_global_scale(
+                        all_calibrate_intermediate
+                    )
+                    layer.w2_input_global_scale[i].copy_(new_global_scale)
 
             if has_separate_shared_experts:
                 assert self.shared_experts is not None
