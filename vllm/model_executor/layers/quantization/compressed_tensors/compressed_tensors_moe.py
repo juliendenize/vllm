@@ -691,13 +691,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
             # Retrieve intermediate results stored by MarlinExperts.apply
             # for calibration purposes (e.g., computing input scales).
-            intermediate = getattr(
-                self.moe_mk.fused_experts, "_last_intermediate", None
-            )
-            if intermediate is not None:
-                output = result[0] if isinstance(result, tuple) else result
-                return output, intermediate
-            return result
+            intermediate = self.moe_mk.fused_experts._last_intermediate
+
+            output = result[0] if isinstance(result, tuple) else result
+            return output, intermediate
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):

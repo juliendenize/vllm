@@ -103,6 +103,9 @@ def split_expert_input_global_scales(state_dict):
                 )
 
         else:  # w2_input_global_scale
+            if tensor.dim() == 1:
+                # vLLM stores w2_input_global_scale as 1D (num_experts,)
+                tensor = tensor.unsqueeze(1)
             if tensor.dim() != 2 or tensor.size(1) != 1:
                 raise ValueError(f"{key} expected [N,1], got {tuple(tensor.shape)}")
 
@@ -168,7 +171,9 @@ def save_shards_if_rank0(model):
     remapped_split = split_gate_up(remapped)
     remapped_final = split_expert_input_global_scales(remapped_split)
 
-    PATH = "/mnt/vast/shared/julien.denize/MS4-conversion/mistral-small-4-nvfp-4-acti"
+    PATH = (
+        "/mnt/vast/shared/julien.denize/MS4-conversion/mistral-small-4-nvfp-4-acti-test"
+    )
     os.makedirs(PATH, exist_ok=True)
     max_shard_size = 2 * 1024**3  # 2 GB
 
@@ -184,7 +189,7 @@ def save_shards_if_rank0(model):
             file_path = os.path.join(PATH, "consolidated-00013-of-00013.safetensors")
             save_file(current_shard, file_path)
             index_meta["weight_map"] = {
-                key: "consolidated-00273-of-00273.safetensors" for key in current_shard
+                key: "consolidated-00013-of-00013.safetensors" for key in current_shard
             }
             print(f"[Rank 0] Saved shard {shard_index} ({len(current_shard)} tensors).")
 
