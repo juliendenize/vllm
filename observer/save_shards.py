@@ -175,7 +175,9 @@ def save_shards_if_rank0(model):
     remapped_split = split_gate_up(remapped)
     remapped_final = split_expert_input_global_scales(remapped_split)
 
-    PATH = "/mnt/vast/shared/julien.denize/MS4-conversion/mistral-small-4-nvfp-4-acti-testing-stuff"
+    PATH = (
+        "/mnt/vast/shared/julien.denize/MS4_release/MS4_candidate_full_quantized_small"
+    )
     os.makedirs(PATH, exist_ok=True)
     max_shard_size = 2 * 1024**3  # 2 GB
 

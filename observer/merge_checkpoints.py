@@ -154,10 +154,11 @@ def merge_checkpoints(
                             "group_size": 16,
                             "num_bits": 4,
                             "observer": "static_minmax",
-                            "observer_kwargs": {},
+                            "scale_dtype": "torch.float8_e4m3fn",
                             "strategy": "tensor_group",
                             "symmetric": True,
                             "type": "float",
+                            "zp_dtype": None,
                         }
 
         # Write updated params.json
