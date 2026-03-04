@@ -138,6 +138,10 @@ def save_shards_if_rank0(model):
     # Collect all tensors
     state_dict = {}
     for prefix, module in model.named_modules():
+        if "shared_expert" in prefix:
+            print(f"Found module: {prefix}, type: {type(module).__name__}")
+            for name, param in module.named_parameters(recurse=False):
+                print(f"  param: {name}, shape: {param.shape}")
         updated = {
             f"{prefix}.{name}" if prefix else name: param
             for name, param in module.named_parameters(recurse=False)
@@ -171,9 +175,7 @@ def save_shards_if_rank0(model):
     remapped_split = split_gate_up(remapped)
     remapped_final = split_expert_input_global_scales(remapped_split)
 
-    PATH = (
-        "/mnt/vast/shared/julien.denize/MS4-conversion/mistral-small-4-nvfp-4-acti-test"
-    )
+    PATH = "/mnt/vast/shared/julien.denize/MS4-conversion/mistral-small-4-nvfp-4-acti-testing-stuff"
     os.makedirs(PATH, exist_ok=True)
     max_shard_size = 2 * 1024**3  # 2 GB
 
