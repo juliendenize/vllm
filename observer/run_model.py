@@ -23,6 +23,8 @@ if __name__ == "__main__":
     # Select number of samples
     NUM_CALIBRATION_SAMPLES = 100
     # NUM_CALIBRATION_SAMPLES_LONG = 5
+    MAX_LEN=1024
+    TP=1
 
     ds = load_dataset(DATASET_ID, split=f"{DATASET_SPLIT}[:{NUM_CALIBRATION_SAMPLES}]")
     # ds_long = load_dataset(
@@ -37,9 +39,9 @@ if __name__ == "__main__":
     )
     llm = LLM(
         model="/mnt/vast/shared/julien.denize/MS4_release/MS4_candidate_weight_quantized",
-        tensor_parallel_size=1,
+        tensor_parallel_size=TP,
         enforce_eager=True,
-        max_model_len=1024,
+        max_model_len=MAX_LEN,
         tokenizer_mode="mistral",
         config_format="mistral",
         load_format="mistral",
@@ -59,7 +61,7 @@ if __name__ == "__main__":
             ).tokens
         )
         print(f"Prompt {counter}: {len_prompt}")
-        if len_prompt > 1023:
+        if len_prompt > MAX_LEN-1:
             print(f"skip {counter}")
             counter += 1
             continue
