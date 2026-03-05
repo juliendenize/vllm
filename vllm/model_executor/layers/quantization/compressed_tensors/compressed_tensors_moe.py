@@ -668,14 +668,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=layer.global_num_experts,
             )
         else:
-
             assert self.moe_mk is not None
-            w13_observers = layer.w13_input_observer
-            for i in range(len(w13_observers)):
-                observer = w13_observers[i]
-                new_global_scale = observer.get_global_scale(x)
-                layer.w13_input_global_scale[i, :].copy_(new_global_scale)
-
             output = self.moe_mk(
                 x,
                 layer.w13_weight,
@@ -688,12 +681,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 shared_experts_input=shared_experts_input,
             )
-
-            w2_observers = layer.w2_input_observer
-            for i in range(len(w2_observers)):
-                observer = w2_observers[i]
-                new_global_scale = observer.get_global_scale(self.moe_mk.fused_experts.intermediate_cache)
-                layer.w2_input_global_scale[i].copy_(new_global_scale)
+            if topk_weights.shape[-1] == 128:
+                self.intermediate_cache = self.moe_mk.fused_experts.intermediate_cache
+            else:
+                self.intermediate_cache = None
+                
             return output
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):

@@ -712,17 +712,23 @@ class DefaultMoERunner(MoERunner):
 
             # Matrix multiply.
             if self.quant_method.is_monolithic:
+                print("is monolithic")
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=layer,
                     x=x,
                     router_logits=router_logits,
                 )
             else:
-                layer.top_k = 128
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=x_orig,
                     router_logits=router_logits,
                 )
+
+                w13_observers = layer.w13_input_observer
+                for i in range(len(w13_observers)):
+                    observer = w13_observers[i]
+                    new_global_scale = observer.get_global_scale(x)
+                    layer.w13_input_global_scale[i, :].copy_(new_global_scale)
 
                 final_hidden_states = self.quant_method.apply(
                     layer=layer,
@@ -731,6 +737,32 @@ class DefaultMoERunner(MoERunner):
                     topk_ids=topk_ids,
                     shared_experts_input=shared_input,
                 )
+
+                original_top_k = self.router.top_k
+                self.router.top_k = 128
+                layer.top_k = 128
+                topk_weights, topk_ids = self.router.select_experts(
+                    hidden_states=x_orig,
+                    router_logits=router_logits,
+                )
+
+                _ = self.quant_method.apply(
+                    layer=layer,
+                    x=x,  # The type signture of this is wrong due to the hack.
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    shared_experts_input=shared_input,
+                )
+
+                self.router.top_k = original_top_k
+                layer.top_k = original_top_k
+
+                w2_observers = layer.w2_input_observer
+                assert self.quant_method.intermediate_cache is not None
+                for i in range(len(w2_observers)):
+                    observer = w2_observers[i]
+                    new_global_scale = observer.get_global_scale(self.quant_method.intermediate_cache)
+                    layer.w2_input_global_scale[i].copy_(new_global_scale)
 
             if has_separate_shared_experts:
                 assert self.shared_experts is not None

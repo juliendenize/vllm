@@ -717,12 +717,6 @@ class MarlinExperts(MarlinExpertsBase):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
 
-        # Skip calibration pass during profiling to avoid memory issues
-        skip_calibration = (
-            is_forward_context_available()
-            and get_forward_context().attn_metadata is None
-        )
-
         # First call: normal forward pass with actual topk
         true_output, intermediate_cache = fused_marlin_moe(
             hidden_states=hidden_states.clone(),
