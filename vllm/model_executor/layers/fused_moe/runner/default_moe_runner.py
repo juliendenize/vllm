@@ -718,6 +718,7 @@ class DefaultMoERunner(MoERunner):
                     router_logits=router_logits,
                 )
             else:
+                layer.top_k = 128
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=x_orig,
                     router_logits=router_logits,

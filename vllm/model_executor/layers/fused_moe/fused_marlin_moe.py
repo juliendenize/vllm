@@ -8,6 +8,7 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -83,7 +84,7 @@ def _fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
     N = marlin_moe_intermediate_size(w1, w2)
@@ -203,7 +204,7 @@ def _fused_marlin_moe(
         is_zp_float=False,
     )
 
-    return output
+    return output, intermediate_cache2
 
 
 def fused_marlin_moe(
@@ -242,7 +243,7 @@ def fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     inplace: bool = False,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
@@ -323,7 +324,7 @@ def fused_marlin_moe(
     )
 
     assert activation is not None
-    moe_output = _fused_marlin_moe(
+    moe_output, out_2 = _fused_marlin_moe(
         hidden_states=hidden_states,
         w1=w1,
         w2=w2,
@@ -358,15 +359,17 @@ def fused_marlin_moe(
         output=None,
         input_dtype=input_dtype,
         is_k_full=is_k_full,
-    ).view(-1, topk, K)
+    )
+    
+    moe_output = moe_output.view(-1, topk, K)
 
     if output is None:
         output = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if moe_sum is None:
-        return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
+        return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output), out_2
     else:
-        return moe_sum(moe_output, output)
+        return moe_sum(moe_output, output), out_2
 
 
 def batched_fused_marlin_moe(
@@ -713,8 +716,16 @@ class MarlinExperts(MarlinExpertsBase):
     ):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
-        return fused_marlin_moe(
-            hidden_states=hidden_states,
+
+        # Skip calibration pass during profiling to avoid memory issues
+        skip_calibration = (
+            is_forward_context_available()
+            and get_forward_context().attn_metadata is None
+        )
+
+        # First call: normal forward pass with actual topk
+        true_output, intermediate_cache = fused_marlin_moe(
+            hidden_states=hidden_states.clone(),
             w1=w1,
             w2=w2,
             bias1=self.w1_bias,
@@ -744,6 +755,8 @@ class MarlinExperts(MarlinExpertsBase):
             is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
         )
+        self.intermediate_cache = intermediate_cache
+        return true_output
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)

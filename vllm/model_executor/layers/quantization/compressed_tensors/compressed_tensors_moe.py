@@ -11,7 +11,7 @@ from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationStrategy,
 )
-
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import Observer
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -491,6 +491,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
         set_weight_attrs(w13_input_scale, extra_weight_attrs)
+        layer.w13_input_observer = [Observer() for i in range(num_experts)]
 
         w2_input_scale = torch.nn.Parameter(
             torch.empty(num_experts, dtype=torch.float32), requires_grad=False
@@ -500,6 +501,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
+        layer.w2_input_observer = [Observer() for i in range(num_experts)]
 
     def process_weights_after_loading(self, layer: FusedMoE) -> None:
         """
@@ -666,8 +668,15 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=layer.global_num_experts,
             )
         else:
+
             assert self.moe_mk is not None
-            return self.moe_mk(
+            w13_observers = layer.w13_input_observer
+            for i in range(len(w13_observers)):
+                observer = w13_observers[i]
+                new_global_scale = observer.get_global_scale(x)
+                layer.w13_input_global_scale[i, :].copy_(new_global_scale)
+
+            output = self.moe_mk(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -680,6 +689,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 shared_experts_input=shared_experts_input,
             )
 
+            w2_observers = layer.w2_input_observer
+            for i in range(len(w2_observers)):
+                observer = w2_observers[i]
+                new_global_scale = observer.get_global_scale(self.moe_mk.fused_experts.intermediate_cache)
+                layer.w2_input_global_scale[i].copy_(new_global_scale)
+            return output
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     """W8A8 FP8 MoE quantization using compressed tensors."""
