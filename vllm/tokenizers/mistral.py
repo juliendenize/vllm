@@ -462,6 +462,12 @@ class MistralTokenizer(TokenizerLike):
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         to_decode_special_tokens = {SpecialTokens.tool_calls}
+        if isinstance(self.instruct, InstructTokenizerV13):
+            if self.instruct.BEGIN_THINK:
+                to_decode_special_tokens.add(SpecialTokens.begin_think)
+            if self.instruct.END_THINK:
+                to_decode_special_tokens.add(SpecialTokens.begin_think)
+
         if self.is_tekken:
             assert isinstance(self.tokenizer, Tekkenizer), type(self.tokenizer)
             tokens = [

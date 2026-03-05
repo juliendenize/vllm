@@ -76,7 +76,7 @@ from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
-from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
+from vllm.tool_parsers.mistral_tool_parser import MistralToolCall, MistralToolParser
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -662,6 +662,10 @@ class OpenAIServingChat(OpenAIServing):
             not tool_choice_function_name
             and self._should_stream_with_auto_tool_parsing(request)
         )
+        tool_choice_required_with_mistral_parser = (
+            request.tool_choice == "required"
+            and isinstance(self.tool_parser, MistralToolParser)
+        )
 
         all_previous_token_ids: list[list[int]] | None
         function_name_returned = [False] * num_choices
@@ -675,7 +679,11 @@ class OpenAIServingChat(OpenAIServing):
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
-        if tool_choice_auto or reasoning_parser:
+        if (
+            tool_choice_auto
+            or reasoning_parser
+            or tool_choice_required_with_mistral_parser
+        ):
             # These are only required in "auto" tool choice case
             all_previous_token_ids = [[]] * num_choices
             # For reasoning parser and tool call all enabled
@@ -687,7 +695,9 @@ class OpenAIServingChat(OpenAIServing):
 
         # Prepare the tool parser if it's needed
         try:
-            if tool_choice_auto and self.tool_parser:
+            if (
+                tool_choice_auto or tool_choice_required_with_mistral_parser
+            ) and self.tool_parser:
                 if tokenizer is None:
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
@@ -1014,15 +1024,34 @@ class OpenAIServingChat(OpenAIServing):
                             # either finished reasoning or no reasoning at all
                             content = current_text
 
-                            delta_message, function_name_returned[i] = (
-                                self.extract_tool_call_required_streaming(
-                                    previous_text=previous_text,
-                                    current_text=content,
-                                    delta_text=delta_text,
-                                    function_name_returned=fn_name_returned,
-                                    tool_call_idx=history_tool_call_cnt,
+                            if isinstance(tool_parser, MistralToolParser):
+                                delta_message = (
+                                    tool_parser.extract_tool_calls_streaming(
+                                        previous_text=previous_text,
+                                        current_text=content,
+                                        delta_text=delta_text,
+                                        previous_token_ids=previous_token_ids,
+                                        current_token_ids=current_token_ids,
+                                        delta_token_ids=as_list(output.token_ids),
+                                        request=request,
+                                    )
                                 )
-                            )
+                                if delta_message and delta_message.tool_calls:
+                                    tools_streamed[i] = True
+                                    history_tool_call_cnt = (
+                                        # id starts at -1 in MistralTokenizer
+                                        tool_parser.current_tool_id + 1
+                                    )
+                            else:
+                                delta_message, function_name_returned[i] = (
+                                    self.extract_tool_call_required_streaming(
+                                        previous_text=previous_text,
+                                        current_text=content,
+                                        delta_text=delta_text,
+                                        function_name_returned=fn_name_returned,
+                                        tool_call_idx=history_tool_call_cnt,
+                                    )
+                                )
                             if (
                                 delta_message
                                 and delta_message.tool_calls
@@ -1138,7 +1167,11 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = DeltaMessage(content=delta_text)
 
                     # update the previous values for the next iteration
-                    if (tool_choice_auto or reasoning_parser) and not self.use_harmony:
+                    if (
+                        tool_choice_auto
+                        or reasoning_parser
+                        or tool_choice_required_with_mistral_parser
+                    ) and not self.use_harmony:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_texts[i] = current_text
