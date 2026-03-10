@@ -114,7 +114,7 @@ def split_expert_input_global_scales(state_dict):
     return state_dict
 
 
-def save_shards_if_rank0(model):
+def save_shards_if_rank0(model, dir):
     """
     Save the full model as multiple .safetensors shard files,
     but only on rank 0 (to avoid multi-GPU overwrite issues).
@@ -157,7 +157,7 @@ def save_shards_if_rank0(model):
     remapped_final = split_expert_input_global_scales(remapped_split)
 
     consolidated = "consolidated-00013-of-00013.safetensors"
-    NEW_PATH = "/raid/engine/dsikka/Mistral-Small-4-119B-2602-NVFP4-v2"
+    NEW_PATH = dir
     os.makedirs(NEW_PATH, exist_ok=True)
     max_shard_size = 2 * 1024**3  # 2 GB
 
