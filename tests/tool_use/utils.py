@@ -19,6 +19,8 @@ class ServerConfig(TypedDict, total=False):
     extended: bool | None  # tests do not run in CI automatically
     reasoning_mode: Literal["none", "intrinsic", "effort"]
     supports_grammar: bool
+    # Some models are not trained for multi-turn tool-call conversations.
+    supports_multi_turn: bool
     # Seconds to wait for the server to start; large models (e.g. 119B fp8 on
     # TP=2) need longer to load and quantize weights than the default.
     startup_timeout: int

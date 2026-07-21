@@ -101,6 +101,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "reasoning_mode": "none",
         "supports_grammar": True,
         "supports_parallel": True,
+        # Not trained for multi-turn tool-call conversations.
+        "supports_multi_turn": False,
     },
     "ministral-8b-reasoning": {
         "model": "mistralai/Ministral-3-8B-reasoning-2512",
