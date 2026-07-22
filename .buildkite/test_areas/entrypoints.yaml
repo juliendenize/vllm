@@ -107,7 +107,7 @@ steps:
   - tests/entrypoints/anthropic
   - tests/entrypoints/generate
   commands:
-  - pytest -v -s tool_use
+  - pytest -v -s tool_use --ignore=tool_use/mistral
   - pytest -v -s entrypoints/tool_parsers
   - pytest -v -s entrypoints/generate
   - pytest -v -s entrypoints/anthropic
@@ -117,6 +117,19 @@ steps:
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
+
+- label: Entrypoints Integration (Mistral Tool Use - Nightly)
+  device: h200_35gb
+  num_devices: 2
+  optional: true
+  key: entrypoints-integration-mistral-tool-use-nightly
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/tool_use
+  commands:
+  - pytest -v -s tool_use/mistral
 
 - label: Entrypoints Integration (Responses API)
   device: h200_35gb
