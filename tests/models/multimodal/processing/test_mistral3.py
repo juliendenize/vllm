@@ -37,8 +37,13 @@ _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
 
 
 class _ProcessorContext:
-    def __init__(self, tokenizer: object) -> None:
+    def __init__(
+        self,
+        tokenizer: object,
+        hf_config: object | None = None,
+    ) -> None:
         self.tokenizer = tokenizer
+        self.hf_config = hf_config or SimpleNamespace(image_token_index=2)
         self.processor_cls: type[object] | None = None
         self.processor_kwargs: dict[str, object] | None = None
 
@@ -49,6 +54,9 @@ class _ProcessorContext:
         self, kwargs: Mapping[str, object]
     ) -> Mapping[str, object]:
         return kwargs
+
+    def get_hf_config(self, config_type: type[object]) -> object:
+        return self.hf_config
 
     def get_hf_processor(self, processor_cls: type[object], **kwargs: object) -> object:
         self.processor_cls = processor_cls
@@ -95,6 +103,15 @@ def test_mistral3_selects_native_processor_for_mistral_tokenizer() -> None:
 
     assert isinstance(processor, MistralCommonPixtralProcessor)
     assert ctx.processor_cls is None
+
+
+def test_mistral3_rejects_native_image_token_id_mismatch_at_setup() -> None:
+    ctx = _ProcessorContext(
+        _mistral_tokenizer(), hf_config=SimpleNamespace(image_token_index=99)
+    )
+
+    with pytest.raises(ValueError, match="Mistral3.*image token id"):
+        Mistral3ProcessingInfo(ctx).get_hf_processor()
 
 
 def test_mistral3_keeps_hf_processor_for_hf_tokenizer() -> None:
@@ -150,6 +167,50 @@ def test_mistral3_rejects_invalid_native_image_rank() -> None:
             {"images": [Image.new("RGB", (48, 32))]},
             {},
             BatchFeature({"images": [torch.ones(1, 3, 32, 48)]}),
+        )
+
+
+@pytest.mark.parametrize(
+    ("images", "error_match"),
+    [
+        ([torch.ones(4, 32, 48)], "3 channels"),
+        ([torch.ones(3, 32, 48, dtype=torch.int64)], "floating-point dtype"),
+        ([torch.ones(3, 0, 48)], "positive spatial dimensions"),
+    ],
+)
+def test_mistral3_rejects_invalid_native_image_contract(
+    images: list[torch.Tensor],
+    error_match: str,
+) -> None:
+    native_processor = _native_pixtral_processor()
+    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: native_processor
+    )
+
+    with pytest.raises(ValueError, match=error_match):
+        multimodal_processor._postprocess_hf_mm_data(
+            {"images": [Image.new("RGB", (48, 32))]},
+            {},
+            BatchFeature({"images": images}),
+        )
+
+
+def test_mistral3_rejects_native_patch_count_mismatch() -> None:
+    native_processor = _native_pixtral_processor()
+    native_processor.image_processor.get_number_of_image_patches = (
+        lambda height, width: (2, 1, 2) if (height, width) == (32, 48) else (1, 1, 1)
+    )
+    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: native_processor
+    )
+
+    with pytest.raises(ValueError, match="Mistral3 pixel_values.*patches"):
+        multimodal_processor._postprocess_hf_mm_data(
+            {"images": [Image.new("RGB", (48, 32))]},
+            {},
+            BatchFeature({"images": [torch.ones(3, 16, 16)]}),
         )
 
 

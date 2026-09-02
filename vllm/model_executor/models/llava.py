@@ -7,9 +7,6 @@ from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
-from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from transformers import (
     BatchFeature,
     CLIPVisionConfig,
@@ -348,44 +345,6 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             )
         }
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
-        mm_data: MultiModalDataDict | None = None,
-    ) -> ProcessorInputs:
-        processor = self.info.get_hf_processor()
-        if not isinstance(processor, MistralCommonPixtralProcessor):
-            return super().get_dummy_processor_inputs(
-                seq_len=seq_len,
-                mm_counts=mm_counts,
-                mm_options=mm_options,
-            )
-
-        dummy_mm_data = (
-            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-            if mm_data is None
-            else mm_data
-        )
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
-        tokenizer = self.info.get_tokenizer()
-        request = ChatCompletionRequest(
-            messages=[
-                UserMessage(
-                    content=[
-                        TextChunk(text=""),
-                        *(
-                            ImageChunk(image=image)
-                            for image in dummy_mm_items["image"].get_all()
-                        ),
-                    ]
-                )
-            ]
-        )
-        dummy_prompt = tokenizer.mistral.encode_chat_completion(request).tokens
-        return ProcessorInputs(prompt=dummy_prompt, mm_data_items=dummy_mm_items)
-
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
@@ -465,7 +424,7 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
                     "Pixtral vision processing."
                 )
             try:
-                return MistralCommonPixtralProcessor(
+                processor = MistralCommonPixtralProcessor(
                     tokenizer=tokenizer,
                     image_processor=MistralCommonImageProcessor(
                         tokenizer.instruct.mm_encoder
@@ -476,6 +435,15 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
                     "Llava Pixtral vision processing cannot construct the native "
                     "Pixtral processor for `tokenizer_mode=mistral`."
                 ) from exc
+
+            hf_config = self.get_hf_config()
+            if processor.image_token_id != hf_config.image_token_index:
+                raise ValueError(
+                    "Llava native Pixtral processing has incompatible image "
+                    f"token id {processor.image_token_id}; expected architecture "
+                    f"image_token_index={hf_config.image_token_index}."
+                )
+            return processor
 
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
@@ -868,6 +836,11 @@ class LlavaForConditionalGeneration(
 
         if pixel_values is not None:
             if self.config.vision_config.model_type == "pixtral":
+                pixel_values = _validate_pixtral_pixel_values(
+                    pixel_values,
+                    expected_channels=self.config.vision_config.num_channels,
+                    field_name="Llava Pixtral pixel_values",
+                )
                 return PixtralHFImagePixelInputs(
                     type="pixel_values_pixtral",
                     pixel_values=pixel_values,
