@@ -12,9 +12,11 @@ from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.renderers import ChatParams
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
+from vllm.renderers.params import TokenizeParams
 from vllm.tokenizers.mistral import MistralTokenizer
 
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @dataclass
@@ -49,6 +51,34 @@ class MockParallelConfig:
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
+
+
+class _MMProcessorPolicy:
+    def __init__(self, events: list[str], error: Exception | None = None) -> None:
+        self.events = events
+        self.error = error
+        self.received_kwargs: object | None = None
+
+    def validate_mm_processor_kwargs(self, kwargs: object) -> None:
+        self.events.append("policy")
+        self.received_kwargs = kwargs
+        if self.error is not None:
+            raise self.error
+
+
+def _make_renderer(events: list[str]) -> MistralRenderer:
+    mock_model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_tokenizer = Mock(spec=MistralTokenizer)
+
+    def apply_chat_template(*_args: object, **_kwargs: object) -> list[int]:
+        events.append("template")
+        return [1, 2, 3]
+
+    mock_tokenizer.apply_chat_template = apply_chat_template
+    return MistralRenderer(
+        MockVllmConfig(mock_model_config, parallel_config=MockParallelConfig()),
+        tokenizer=mock_tokenizer,
+    )
 
 
 @pytest.mark.asyncio
@@ -89,6 +119,58 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
         "Mocked blocking tokenizer was not called"
     )
     assert blocked_count == 0, "Event loop blocked during tokenization"
+
+
+def test_renderer_noop_policy_preserves_chat_rendering():
+    events: list[str] = []
+    renderer = _make_renderer(events)
+    renderer.mm_processor = _MMProcessorPolicy(events)
+
+    _, prompts = renderer.render_chat(
+        conversations=[[]],
+        chat_params=ChatParams(mm_processor_kwargs={"size": 42}),
+        tok_params=TokenizeParams(max_total_tokens=100),
+    )
+
+    assert prompts[0]["prompt_token_ids"] == [1, 2, 3]
+    assert events == ["policy", "template"]
+
+
+def test_renderer_policy_receives_exact_kwargs_before_sync_chat_rendering():
+    events: list[str] = []
+    renderer = _make_renderer(events)
+    policy = _MMProcessorPolicy(events, ValueError("invalid multimodal kwargs"))
+    renderer.mm_processor = policy
+    mm_processor_kwargs = {"size": 42}
+
+    with pytest.raises(ValueError, match="invalid multimodal kwargs"):
+        renderer.render_chat(
+            conversations=[[]],
+            chat_params=ChatParams(mm_processor_kwargs=mm_processor_kwargs),
+            tok_params=TokenizeParams(max_total_tokens=100),
+        )
+
+    assert policy.received_kwargs is mm_processor_kwargs
+    assert events == ["policy"]
+
+
+def test_renderer_policy_runs_before_async_chat_rendering():
+    events: list[str] = []
+    renderer = _make_renderer(events)
+    renderer.mm_processor = _MMProcessorPolicy(
+        events, ValueError("invalid multimodal kwargs")
+    )
+
+    with pytest.raises(ValueError, match="invalid multimodal kwargs"):
+        asyncio.run(
+            renderer.render_chat_async(
+                conversations=[[]],
+                chat_params=ChatParams(mm_processor_kwargs={"size": 42}),
+                tok_params=TokenizeParams(max_total_tokens=100),
+            )
+        )
+
+    assert events == ["policy"]
 
 
 def test_apply_mistral_chat_template_thinking_chunk():

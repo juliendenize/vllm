@@ -1038,6 +1038,14 @@ class BaseRenderer(ABC, Generic[_T]):
     ):
         arrival_time = time.time()
 
+        if (
+            self.mm_processor is not None
+            and chat_params.mm_processor_kwargs is not None
+        ):
+            self.mm_processor.validate_mm_processor_kwargs(
+                kwargs=chat_params.mm_processor_kwargs
+            )
+
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
@@ -1073,6 +1081,14 @@ class BaseRenderer(ABC, Generic[_T]):
         skip_mm_cache: bool = False,
     ):
         arrival_time = time.time()
+
+        if (
+            self.mm_processor is not None
+            and chat_params.mm_processor_kwargs is not None
+        ):
+            self.mm_processor.validate_mm_processor_kwargs(
+                kwargs=chat_params.mm_processor_kwargs
+            )
 
         if tok_params is None:
             tok_params = self.default_chat_tok_params
