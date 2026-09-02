@@ -7,6 +7,7 @@ import pytest
 import torch
 from PIL import Image
 from transformers import BatchFeature
+from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.inputs import MultiModalDataDict
@@ -28,6 +29,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
+from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...registry import HF_EXAMPLE_MODELS
 from .test_mistral3 import (
@@ -42,8 +44,9 @@ pytestmark = pytest.mark.skip_global_cleanup
 _PIXTRAL_MODEL_ID = "mistral-community/pixtral-12b"
 
 
-def _build_native_pixtral_context(
+def _build_pixtral_context(
     *,
+    tokenizer_mode: str,
     limit_mm_per_prompt: dict[str, int],
     mm_processor_cache_gb: int,
 ) -> InputProcessingContext:
@@ -57,7 +60,7 @@ def _build_native_pixtral_context(
     model_config = ModelConfig(
         _PIXTRAL_MODEL_ID,
         tokenizer="mistralai/Pixtral-12B-2409",
-        tokenizer_mode="mistral",
+        tokenizer_mode=tokenizer_mode,
         config_format="hf",
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
@@ -70,6 +73,62 @@ def _build_native_pixtral_context(
     return InputProcessingContext(
         model_config,
         tokenizer=cached_tokenizer_from_config(model_config),
+    )
+
+
+@pytest.mark.parametrize(
+    ("tokenizer_mode", "processor_type"),
+    [
+        ("hf", PixtralProcessor),
+        ("mistral", MistralCommonPixtralProcessor),
+        ("auto", MistralCommonPixtralProcessor),
+    ],
+)
+def test_pixtral_hf_tokenizer_matrix(
+    tokenizer_mode: str,
+    processor_type: type[object],
+) -> None:
+    ctx = _build_pixtral_context(
+        tokenizer_mode=tokenizer_mode,
+        limit_mm_per_prompt={"image": 2},
+        mm_processor_cache_gb=0,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config, tokenizer=ctx.tokenizer
+    )
+    hf_processor = processor.info.get_hf_processor()
+    assert type(hf_processor) is processor_type
+    assert is_mistral_tokenizer(ctx.tokenizer) == (tokenizer_mode != "hf")
+
+    images = [Image.new("RGB", (48, 32)), Image.new("RGB", (64, 32))]
+    processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"image": 2},
+        mm_options={},
+        mm_data={"image": images},
+    )
+    output = processor.apply(processor_inputs, TimingContext(enabled=False))
+    mm_data = output["mm_kwargs"].get_data()
+
+    assert set(output) == {
+        "type",
+        "prompt_token_ids",
+        "mm_kwargs",
+        "mm_placeholders",
+        "mm_hashes",
+    }
+    assert set(mm_data) == {"pixel_values"}
+    assert [tuple(value.shape) for value in mm_data["pixel_values"]] == [
+        (3, 32, 48),
+        (3, 32, 64),
+    ]
+    assert [item.get_num_embeds() for item in output["mm_placeholders"]["image"]] == [
+        6,
+        8,
+    ]
+    assert (
+        output["prompt_token_ids"].count(ctx.model_config.hf_config.image_token_index)
+        == 14
     )
 
 
@@ -227,7 +286,8 @@ def test_pixtral_hf_apply_rejects_size_before_cache_hashing() -> None:
 def test_pixtral_hf_native_dummy_inputs_match_cache_paths(
     cache_enabled: bool,
 ) -> None:
-    ctx = _build_native_pixtral_context(
+    ctx = _build_pixtral_context(
+        tokenizer_mode="mistral",
         limit_mm_per_prompt={"image": 2},
         mm_processor_cache_gb=4 if cache_enabled else 0,
     )
@@ -288,7 +348,8 @@ def test_pixtral_hf_native_dummy_inputs_match_cache_paths(
 
 @pytest.mark.parametrize("cache_enabled", [False, True])
 def test_pixtral_hf_native_dummy_inputs_build_budget(cache_enabled: bool) -> None:
-    ctx = _build_native_pixtral_context(
+    ctx = _build_pixtral_context(
+        tokenizer_mode="mistral",
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=4,
     )

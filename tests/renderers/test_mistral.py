@@ -4,18 +4,24 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+from transformers.models.pixtral import PixtralProcessor
 
-from vllm.renderers import ChatParams
+from vllm.config import DeviceConfig, LoadConfig, ModelConfig, VllmConfig
+from vllm.renderers import ChatParams, renderer_from_config
+from vllm.renderers.hf import HfRenderer
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.renderers.params import TokenizeParams
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
+from vllm.utils.mistral import is_mistral_tokenizer
 
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+HF_MISTRAL3_MODEL_NAME = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 pytestmark = pytest.mark.skip_global_cleanup
 
 
@@ -79,6 +85,47 @@ def _make_renderer(events: list[str]) -> MistralRenderer:
         MockVllmConfig(mock_model_config, parallel_config=MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
+
+
+@pytest.mark.parametrize(
+    ("tokenizer_mode", "uses_mistral_tokenizer", "processor_type"),
+    [
+        ("hf", False, PixtralProcessor),
+        ("mistral", True, MistralCommonPixtralProcessor),
+        ("auto", True, MistralCommonPixtralProcessor),
+    ],
+)
+def test_hf_mistral3_renderer_tokenizer_matrix(
+    tokenizer_mode: str,
+    uses_mistral_tokenizer: bool,
+    processor_type: type[object],
+) -> None:
+    model_config = ModelConfig(
+        HF_MISTRAL3_MODEL_NAME,
+        tokenizer=HF_MISTRAL3_MODEL_NAME,
+        tokenizer_mode=tokenizer_mode,
+        config_format="hf",
+        dtype="auto",
+        seed=0,
+    )
+    renderer = cast(
+        HfRenderer | MistralRenderer,
+        renderer_from_config(
+            VllmConfig(
+                model_config=model_config,
+                load_config=LoadConfig(load_format="hf"),
+                device_config=DeviceConfig(device="cpu"),
+            )
+        ),
+    )
+
+    if tokenizer_mode == "hf":
+        assert type(renderer) is HfRenderer
+    else:
+        assert type(renderer) is MistralRenderer
+    assert is_mistral_tokenizer(renderer.tokenizer) == uses_mistral_tokenizer
+    assert renderer.mm_processor is not None
+    assert isinstance(renderer.mm_processor.info.get_hf_processor(), processor_type)
 
 
 @pytest.mark.asyncio

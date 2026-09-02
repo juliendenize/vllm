@@ -213,6 +213,35 @@ def test_chat(
     )
 
 
+@large_gpu_test(min_gb=80)
+@pytest.mark.parametrize("tokenizer_mode", ["hf", "mistral"])
+def test_hf_format_chat_tokenizer_matrix(
+    vllm_runner,
+    tokenizer_mode: str,
+    local_asset_server,
+) -> None:
+    urls = [local_asset_server.url_for(IMG_URLS[0])]
+    messages = _create_msg_format_hf(urls)
+
+    with vllm_runner(
+        MISTRAL_SMALL_3_1_ID,
+        dtype="bfloat16",
+        tokenizer_mode=tokenizer_mode,
+        config_format="hf",
+        load_format="hf",
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": 1},
+    ) as vllm_model:
+        outputs = vllm_model.llm.chat(
+            messages,
+            sampling_params=SamplingParams(max_tokens=16, temperature=0.0),
+        )
+
+    assert outputs
+    assert outputs[0].outputs
+    assert outputs[0].outputs[0].text
+
+
 @large_gpu_test(min_gb=16)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:

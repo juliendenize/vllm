@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Mistral3's multimodal preprocessing."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 from transformers import BatchFeature, Mistral3Config
+from transformers.models.pixtral import PixtralProcessor
 
-from vllm.config import DeviceConfig, VllmConfig
+from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.lightonocr import LightOnOCRProcessingInfo
 from vllm.model_executor.models.mistral3 import (
@@ -26,7 +28,12 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems
-from vllm.multimodal.processing import ProcessorInputs, TimingContext
+from vllm.multimodal.processing import (
+    InputProcessingContext,
+    ProcessorInputs,
+    TimingContext,
+)
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processors.pixtral import (
     MistralCommonImageProcessor,
@@ -121,6 +128,105 @@ def _native_pixtral_processor() -> MistralCommonPixtralProcessor:
     return MistralCommonPixtralProcessor(
         tokenizer=tokenizer,
         image_processor=MistralCommonImageProcessor(tokenizer.instruct.mm_encoder),
+    )
+
+
+def _build_mistral3_processing_context(
+    tokenizer_mode: str,
+) -> InputProcessingContext:
+    model_config = ModelConfig(
+        _MODEL_ID,
+        tokenizer=_MODEL_ID,
+        tokenizer_mode=tokenizer_mode,
+        config_format="hf",
+        dtype="auto",
+        seed=0,
+        limit_mm_per_prompt={"image": 2},
+    )
+    return InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
+
+
+@pytest.mark.parametrize(
+    ("tokenizer_mode", "processor_type"),
+    [
+        ("hf", PixtralProcessor),
+        ("mistral", MistralCommonPixtralProcessor),
+        ("auto", MistralCommonPixtralProcessor),
+    ],
+)
+def test_mistral3_hf_format_tokenizer_matrix(
+    tokenizer_mode: str,
+    processor_type: type[object],
+) -> None:
+    ctx = _build_mistral3_processing_context(tokenizer_mode)
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config, tokenizer=ctx.tokenizer
+    )
+    hf_processor = cast(
+        PixtralProcessor | MistralCommonPixtralProcessor,
+        processor.info.get_hf_processor(),
+    )
+    assert type(hf_processor) is processor_type
+    assert isinstance(ctx.tokenizer, MistralTokenizer) == (tokenizer_mode != "hf")
+
+    if isinstance(hf_processor, MistralCommonPixtralProcessor):
+        images = [Image.new("RGB", (48, 32)), Image.new("RGB", (64, 32))]
+        processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+            seq_len=ctx.model_config.max_model_len,
+            mm_counts={"image": 2},
+            mm_options={},
+            mm_data={"image": images},
+        )
+        output = processor.apply(processor_inputs, TimingContext(enabled=False))
+        mm_data = output["mm_kwargs"].get_data()
+        expected_patch_counts = [
+            hf_processor.image_processor.get_number_of_image_patches(
+                height=image.height,
+                width=image.width,
+            )[0]
+            for image in images
+        ]
+
+        assert set(mm_data) == {"pixel_values"}
+        assert [tuple(value.shape) for value in mm_data["pixel_values"]] == [
+            (3, 56, 56),
+            (3, 56, 84),
+        ]
+        assert processor_inputs.prompt.count(hf_processor.image_token_id) == sum(
+            expected_patch_counts
+        )
+        assert [
+            item.get_num_embeds() for item in output["mm_placeholders"]["image"]
+        ] == expected_patch_counts
+        return
+
+    images = [Image.new("RGB", (448, 448)), Image.new("RGB", (448, 672))]
+    processed = cast(Callable[..., BatchFeature], hf_processor)(
+        images=images,
+        return_tensors="pt",
+    )
+    output = processor._postprocess_hf_mm_data(
+        {"images": images},
+        {},
+        BatchFeature(processed),
+    )
+    assert set(output) == {"pixel_values", "image_sizes"}
+    assert [tuple(value.shape) for value in output["pixel_values"]] == [
+        (3, 448, 448),
+        (3, 672, 448),
+    ]
+    assert tuple(output["image_sizes"].shape) == (2, 2)
+    assert _placeholder_count_from_prompt_updates(
+        processor,
+        images,
+        output["pixel_values"],
+        {},
+    ) == sum(
+        _expected_placeholder_tokens_per_image(hf_processor, value)
+        for value in output["pixel_values"]
     )
 
 
