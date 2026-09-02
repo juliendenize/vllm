@@ -23,8 +23,14 @@ class MistralCommonImageProcessor(ImageProcessingMixin):
         self,
         images: ImageInput,
         return_tensors: str | TensorType | None = None,
-        **kwargs,
+        size: object = None,
     ) -> BatchFeature:
+        if size is not None:
+            raise ValueError(
+                "Mistral tokenizer mode does not support `size` for native "
+                "Pixtral image processing."
+            )
+
         images_lst = [images] if not isinstance(images, list) else images
 
         images_processed = list[torch.Tensor]()
@@ -65,6 +71,9 @@ class MistralCommonImageProcessor(ImageProcessingMixin):
 
 class MistralCommonPixtralProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
+    image_token = "[IMG]"
+    image_break_token = "[IMG_BREAK]"
+    image_end_token = "[IMG_END]"
 
     def __init__(
         self,
@@ -78,3 +87,48 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
         self.image_break_id = image_special_ids.img_break
         self.image_token_id = image_special_ids.img
         self.image_end_id = image_special_ids.img_end
+
+    def __call__(
+        self,
+        text: str | list[str] | None = None,
+        images: ImageInput | None = None,
+        return_tensors: str | TensorType | None = None,
+        **kwargs: object,
+    ) -> BatchFeature:
+        if "size" in kwargs:
+            raise ValueError(
+                "Mistral tokenizer mode does not support `size` for native "
+                "Pixtral processing."
+            )
+
+        outputs = dict[str, object]()
+        if text is not None:
+            text_keys = (
+                "padding",
+                "truncation",
+                "max_length",
+                "stride",
+                "pad_to_multiple_of",
+                "return_attention_mask",
+                "return_token_type_ids",
+                "verbose",
+            )
+            text_kwargs = {key: kwargs[key] for key in text_keys if key in kwargs}
+            outputs.update(
+                self.tokenizer(
+                    text=text,
+                    add_special_tokens=False,
+                    return_tensors=return_tensors,
+                    **text_kwargs,
+                )
+            )
+
+        if images is not None:
+            outputs.update(
+                self.image_processor(
+                    images=images,
+                    return_tensors=None,
+                )
+            )
+
+        return BatchFeature(outputs)

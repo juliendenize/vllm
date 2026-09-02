@@ -7,12 +7,20 @@ from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, Mistral3Config, PixtralVisionConfig
+from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from transformers import (
+    BatchFeature,
+    Mistral3Config,
+    PixtralVisionConfig,
+    ProcessorMixin,
+)
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -22,21 +30,35 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
+    MultiModalKwargsOptionalItems,
 )
 from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
+)
+from vllm.multimodal.processing.processor import (
+    MultiModalPromptUpdates,
+    PlaceholderFeaturesInfo,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.processors.pixtral import (
+    MistralCommonImageProcessor,
+    MistralCommonPixtralProcessor,
+)
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -55,6 +77,90 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+
+
+def _validate_mistral3_pixel_values(
+    pixel_values: object,
+    *,
+    source_images: object | None = None,
+    processor: MistralCommonPixtralProcessor | None = None,
+) -> torch.Tensor | list[torch.Tensor]:
+    field_name = "Mistral3 pixel_values"
+    if isinstance(pixel_values, torch.Tensor):
+        if pixel_values.ndim != 4:
+            raise ValueError(
+                f"{field_name} must be a 4-D tensor or a list of 3-D tensors, "
+                f"got rank {pixel_values.ndim}."
+            )
+        images = list(pixel_values.unbind(0))
+    elif isinstance(pixel_values, list):
+        if not pixel_values:
+            raise ValueError(f"{field_name} must contain at least one image.")
+        images = pixel_values
+    else:
+        raise ValueError(
+            f"{field_name} must be a 4-D tensor or a list of 3-D tensors, "
+            f"got {type(pixel_values).__name__}."
+        )
+
+    if not images:
+        raise ValueError(f"{field_name} must contain at least one image.")
+
+    for image_idx, image in enumerate(images):
+        if not isinstance(image, torch.Tensor) or image.ndim != 3:
+            rank = image.ndim if isinstance(image, torch.Tensor) else "unknown"
+            raise ValueError(
+                f"{field_name}[{image_idx}] must be a 3-D tensor, got rank {rank}."
+            )
+        if not image.is_floating_point():
+            raise ValueError(
+                f"{field_name}[{image_idx}] must use a floating-point dtype, "
+                f"got {image.dtype}."
+            )
+        if image.shape[0] != 3:
+            raise ValueError(
+                f"{field_name}[{image_idx}] must have 3 channels, got {image.shape[0]}."
+            )
+        if image.shape[-2] <= 0 or image.shape[-1] <= 0:
+            raise ValueError(
+                f"{field_name}[{image_idx}] must have positive spatial "
+                f"dimensions, got {tuple(image.shape)}."
+            )
+
+    if source_images is not None:
+        if isinstance(source_images, (list, tuple)):
+            expected_count = len(source_images)
+        else:
+            expected_count = 1
+        if len(images) != expected_count:
+            raise ValueError(
+                f"{field_name} and source images must contain the same number "
+                f"of images, got {len(images)} and {expected_count}."
+            )
+
+        if processor is not None:
+            source_items = ImageProcessorItems(
+                list(source_images)
+                if isinstance(source_images, (list, tuple))
+                else [source_images]
+            )
+            for image_idx, image in enumerate(images):
+                source_size = source_items.get_image_size(image_idx)
+                source_patches = processor.image_processor.get_number_of_image_patches(
+                    height=source_size.height,
+                    width=source_size.width,
+                )[0]
+                output_patches = processor.image_processor.get_number_of_image_patches(
+                    height=image.shape[-2],
+                    width=image.shape[-1],
+                )[0]
+                if source_patches != output_patches:
+                    raise ValueError(
+                        f"{field_name}[{image_idx}] has {output_patches} image "
+                        f"patches, expected {source_patches}."
+                    )
+
+    return pixel_values
 
 
 class Mistral3ImagePixelInputs(TensorSchema):
@@ -210,6 +316,9 @@ class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
 
 
 class Mistral3ProcessingInfo(BaseProcessingInfo):
+    def get_tokenizer(self) -> TokenizerLike:
+        return super().get_tokenizer()
+
     def get_hf_config(self) -> Mistral3Config:
         return self.ctx.get_hf_config(Mistral3Config)
 
@@ -218,6 +327,10 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> Mistral3HFEncoderInfo:
         processor = self.get_hf_processor()
+        if isinstance(processor, MistralCommonPixtralProcessor):
+            image_size = processor.image_processor.mm_encoder.mm_config.max_image_size
+            return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
+
         size = processor.image_processor.size
         merged_kwargs = self.ctx.get_merged_mm_kwargs(mm_processor_kwargs or {})
         if override_size := merged_kwargs.get("size"):
@@ -226,8 +339,40 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         image_size = size["longest_edge"]
         return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
 
-    def get_hf_processor(self, **kwargs: object):
+    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+        tokenizer = self.get_tokenizer()
+        if is_mistral_tokenizer(tokenizer):
+            merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+            if "size" in merged_kwargs:
+                raise ValueError(
+                    "Mistral tokenizer mode does not support `size` for Mistral3 "
+                    "vision processing."
+                )
+            try:
+                return MistralCommonPixtralProcessor(
+                    tokenizer=tokenizer,
+                    image_processor=MistralCommonImageProcessor(
+                        tokenizer.instruct.mm_encoder
+                    ),
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Mistral3 vision processing cannot construct the native "
+                    "Pixtral processor for `tokenizer_mode=mistral`."
+                ) from exc
+
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
+
+    def validate_mm_processor_kwargs(
+        self,
+        kwargs: Mapping[str, object],
+    ) -> None:
+        effective_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        if is_mistral_tokenizer(self.get_tokenizer()) and "size" in effective_kwargs:
+            raise ValueError(
+                "Mistral tokenizer mode does not support `size` for Mistral3 "
+                "vision processing."
+            )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -255,6 +400,8 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo])
         num_images = mm_counts.get("image", 0)
 
         processor = self.info.get_hf_processor()
+        if isinstance(processor, MistralCommonPixtralProcessor):
+            return ""
         image_token = processor.image_token
 
         return image_token * num_images
@@ -280,8 +427,77 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo])
             )
         }
 
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+        mm_data: MultiModalDataDict | None = None,
+    ) -> ProcessorInputs:
+        processor = self.info.get_hf_processor()
+        if not isinstance(processor, MistralCommonPixtralProcessor):
+            return super().get_dummy_processor_inputs(
+                seq_len=seq_len,
+                mm_counts=mm_counts,
+                mm_options=mm_options,
+            )
+
+        dummy_mm_data = (
+            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+            if mm_data is None
+            else mm_data
+        )
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+        tokenizer = self.info.get_tokenizer()
+
+        request = ChatCompletionRequest(
+            messages=[
+                UserMessage(
+                    content=[
+                        TextChunk(text=""),
+                        *(
+                            ImageChunk(image=image)
+                            for image in dummy_mm_items["image"].get_all()
+                        ),
+                    ]
+                )
+            ]
+        )
+        dummy_prompt = tokenizer.mistral.encode_chat_completion(request).tokens
+        return ProcessorInputs(prompt=dummy_prompt, mm_data_items=dummy_mm_items)
+
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
+    def __call__(
+        self,
+        prompt: str | list[int],
+        mm_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
+    ) -> MultiModalInput:
+        kwargs = hf_processor_mm_kwargs or {}
+        self.validate_mm_processor_kwargs(kwargs)
+        return super().__call__(
+            prompt=prompt,
+            mm_items=mm_items,
+            mm_uuid_items=mm_uuid_items,
+            hf_processor_mm_kwargs=kwargs,
+        )
+
+    def apply(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        self.validate_mm_processor_kwargs(inputs.hf_processor_mm_kwargs)
+        return super().apply(inputs=inputs, timing_ctx=timing_ctx)
+
+    def validate_mm_processor_kwargs(
+        self,
+        kwargs: Mapping[str, object],
+    ) -> None:
+        self.info.validate_mm_processor_kwargs(kwargs)
+
     def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -294,12 +510,31 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         if not mm_data:
             return processed_data
 
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        if isinstance(processor, MistralCommonPixtralProcessor):
+            images = processed_data.pop("images", None)
+            if images is None:
+                raise ValueError(
+                    "Mistral3 native Pixtral processing is missing `images`; "
+                    "the native processor must return image tensors."
+                )
+            processed_data["pixel_values"] = _validate_mistral3_pixel_values(
+                images,
+                source_images=mm_data.get("images"),
+                processor=processor,
+            )
+
         pixel_values = processed_data.get("pixel_values")
-        if pixel_values is not None:
+        if pixel_values is not None and "image_sizes" in processed_data:
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
             image_sizes = processed_data["image_sizes"]
-            assert len(pixel_values) == len(image_sizes)
+            if len(pixel_values) != len(image_sizes):
+                raise ValueError(
+                    "Mistral3 pixel_values and image_sizes must contain the "
+                    f"same number of images, got {len(pixel_values)} and "
+                    f"{len(image_sizes)}."
+                )
 
             processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
@@ -317,6 +552,28 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
+    def _maybe_apply_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        prompt_ids: list[int],
+        mm_kwargs: MultiModalKwargsOptionalItems,
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        if not isinstance(self.info.get_hf_processor(), MistralCommonPixtralProcessor):
+            return super()._maybe_apply_prompt_updates(
+                mm_items,
+                prompt_ids,
+                mm_kwargs,
+                mm_prompt_updates,
+            )
+
+        mm_item_counts = mm_items.get_all_counts()
+        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
+        mm_placeholders = self._find_mm_placeholders(prompt_ids, mm_prompt_updates)
+        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+        return prompt_ids, mm_placeholders
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -326,11 +583,21 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         hf_config = self.info.get_hf_config()
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
-        image_break_id = vocab[processor.image_break_token]
-        image_token_id = hf_config.image_token_index
-        image_end_id = vocab[processor.image_end_token]
+        if isinstance(processor, MistralCommonPixtralProcessor):
+            image_break_id = processor.image_break_id
+            image_token_id = processor.image_token_id
+            image_end_id = processor.image_end_id
+            if image_token_id != hf_config.image_token_index:
+                raise ValueError(
+                    "Mistral3 native Pixtral processing has incompatible image "
+                    f"token id {image_token_id}; expected architecture "
+                    f"image_token_index={hf_config.image_token_index}."
+                )
+        else:
+            vocab = tokenizer.get_vocab()
+            image_break_id = vocab[processor.image_break_token]
+            image_token_id = hf_config.image_token_index
+            image_end_id = vocab[processor.image_end_token]
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
         encoder_info = self.info.get_vision_encoder_info(hf_processor_mm_kwargs)
@@ -339,20 +606,39 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = encoder_info.get_patch_grid_size(
-                image_width=image_size.width,
-                image_height=image_size.height,
-            )
+            if isinstance(processor, MistralCommonPixtralProcessor):
+                try:
+                    _, nrows, ncols = (
+                        processor.image_processor.get_number_of_image_patches(
+                            height=image_size.height,
+                            width=image_size.width,
+                        )
+                    )
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Mistral3 native Pixtral processing cannot determine "
+                        "the image patch grid from the native image processor."
+                    ) from exc
+            else:
+                ncols, nrows = encoder_info.get_patch_grid_size(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                )
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
             tokens[-1] = image_end_id
 
             return PromptUpdateDetails.select_token_id(tokens, image_token_id)
 
+        replacement_target = (
+            []
+            if isinstance(processor, MistralCommonPixtralProcessor)
+            else [image_token_id]
+        )
         return [
             PromptReplacement(
                 modality="image",
-                target=[image_token_id],
+                target=replacement_target,
                 replacement=get_replacement,
             ),
         ]
@@ -499,8 +785,13 @@ class Mistral3ForConditionalGeneration(
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None and image_embeds is None:
+        if image_embeds is not None:
+            raise ValueError("Mistral3 does not support `image_embeds` inputs.")
+
+        if pixel_values is None:
             return None
+
+        pixel_values = _validate_mistral3_pixel_values(pixel_values)
 
         return Mistral3ImagePixelInputs(
             type="pixel_values_pixtral",

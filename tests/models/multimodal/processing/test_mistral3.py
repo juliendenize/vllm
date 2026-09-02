@@ -1,25 +1,187 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for Mistral3's multimodal preprocessing kwargs."""
+"""Tests for Mistral3's multimodal preprocessing."""
+
+from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 import torch
 from PIL import Image
-from transformers import BatchFeature
+from transformers import BatchFeature, Mistral3Config
 
 from vllm.model_executor.models.lightonocr import LightOnOCRProcessingInfo
-from vllm.model_executor.models.mistral3 import Mistral3HFEncoderInfo
+from vllm.model_executor.models.mistral3 import (
+    Mistral3HFEncoderInfo,
+    Mistral3MultiModalProcessor,
+    Mistral3ProcessingInfo,
+)
 from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.processors.pixtral import (
+    MistralCommonImageProcessor,
+    MistralCommonPixtralProcessor,
+)
 
 from ...utils import build_model_context
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 # This repo ships both params.json (Mistral) and config.json (HF). Auto config
 # selects PixtralForConditionalGeneration; force HF to exercise Mistral3.
 _MODEL_CONFIG_KWARGS = {"config_format": "hf"}
 _MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
+
+
+class _ProcessorContext:
+    def __init__(self, tokenizer: object) -> None:
+        self.tokenizer = tokenizer
+        self.processor_cls: type[object] | None = None
+        self.processor_kwargs: dict[str, object] | None = None
+
+    def get_tokenizer(self) -> object:
+        return self.tokenizer
+
+    def get_merged_mm_kwargs(
+        self, kwargs: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        return kwargs
+
+    def get_hf_processor(self, processor_cls: type[object], **kwargs: object) -> object:
+        self.processor_cls = processor_cls
+        self.processor_kwargs = kwargs
+        return SimpleNamespace(processor_cls=processor_cls, patch_size=1)
+
+
+class _NativeTextTokenizer:
+    def __call__(self, **kwargs: object) -> dict[str, object]:
+        self.kwargs = kwargs
+        return {"input_ids": [[11]], "attention_mask": [[1]]}
+
+
+class _NativeImageEncoder:
+    special_ids = SimpleNamespace(img_break=1, img=2, img_end=3)
+
+    def __call__(self, image_chunk: object) -> SimpleNamespace:
+        return SimpleNamespace(image=torch.ones(3, 32, 48))
+
+    def _image_to_num_tokens(self, image: Image.Image) -> tuple[int, int]:
+        return 2, 1
+
+
+def _mistral_tokenizer() -> MistralTokenizer:
+    tokenizer = object.__new__(MistralTokenizer)
+    tokenizer.transformers_tokenizer = _NativeTextTokenizer()
+    tokenizer.instruct = SimpleNamespace(mm_encoder=_NativeImageEncoder())
+    return tokenizer
+
+
+def _native_pixtral_processor() -> MistralCommonPixtralProcessor:
+    tokenizer = _mistral_tokenizer()
+    return MistralCommonPixtralProcessor(
+        tokenizer=tokenizer,
+        image_processor=MistralCommonImageProcessor(tokenizer.instruct.mm_encoder),
+    )
+
+
+def test_mistral3_selects_native_processor_for_mistral_tokenizer() -> None:
+    ctx = _ProcessorContext(_mistral_tokenizer())
+    info = Mistral3ProcessingInfo(ctx)
+
+    processor = info.get_hf_processor()
+
+    assert isinstance(processor, MistralCommonPixtralProcessor)
+    assert ctx.processor_cls is None
+
+
+def test_mistral3_keeps_hf_processor_for_hf_tokenizer() -> None:
+    ctx = _ProcessorContext(object())
+    info = Mistral3ProcessingInfo(ctx)
+
+    info.get_hf_processor(size={"longest_edge": 448})
+
+    assert ctx.processor_kwargs == {"size": {"longest_edge": 448}}
+
+
+def test_native_pixtral_processor_tokenizes_text_and_images() -> None:
+    processor = _native_pixtral_processor()
+
+    output = processor(
+        text="plain text",
+        images=[Image.new("RGB", (48, 32))],
+        return_tensors="pt",
+    )
+
+    assert output["input_ids"] == [[11]]
+    assert output["attention_mask"] == [[1]]
+    assert output["images"][0].shape == (3, 32, 48)
+    assert output["images"][0].dtype == torch.float32
+    assert processor.tokenizer.kwargs["add_special_tokens"] is False
+
+
+def test_mistral3_normalizes_native_images_to_pixel_values() -> None:
+    native_processor = _native_pixtral_processor()
+    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: native_processor
+    )
+    processed_data = BatchFeature({"images": [torch.ones(3, 32, 48)]})
+
+    output = multimodal_processor._postprocess_hf_mm_data(
+        {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
+    )
+
+    assert torch.equal(output["pixel_values"][0], torch.ones(3, 32, 48))
+    assert "images" not in output
+
+
+def test_mistral3_rejects_invalid_native_image_rank() -> None:
+    native_processor = _native_pixtral_processor()
+    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: native_processor
+    )
+
+    with pytest.raises(ValueError, match="Mistral3.*3-D tensor"):
+        multimodal_processor._postprocess_hf_mm_data(
+            {"images": [Image.new("RGB", (48, 32))]},
+            {},
+            BatchFeature({"images": [torch.ones(1, 3, 32, 48)]}),
+        )
+
+
+def test_mistral3_rejects_size_for_native_tokenizer() -> None:
+    processor = object.__new__(Mistral3MultiModalProcessor)
+    processor.info = Mistral3ProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
+
+    with pytest.raises(ValueError, match="Mistral tokenizer mode.*size"):
+        processor.validate_mm_processor_kwargs({"size": {"longest_edge": 448}})
+
+
+def test_mistral3_native_prompt_updates_do_not_replace_full_grid() -> None:
+    native_processor = _native_pixtral_processor()
+    config = Mistral3Config()
+    config.image_token_index = native_processor.image_token_id
+    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: native_processor,
+        get_hf_config=lambda: config,
+        get_tokenizer=lambda: _mistral_tokenizer(),
+        get_vision_encoder_info=lambda kwargs: object(),
+    )
+    images = SimpleNamespace(
+        get_image_size=lambda item_idx: SimpleNamespace(width=48, height=32)
+    )
+    mm_items = SimpleNamespace(get_items=lambda modality, item_type: images)
+
+    updates = multimodal_processor._get_prompt_updates(mm_items, {}, None)
+    resolved = updates[0].resolve(0)
+
+    assert resolved.target == []
+    assert resolved.content.full.count(native_processor.image_token_id) == 2
 
 
 def _processed_pixel_values(
@@ -107,7 +269,11 @@ def test_processor_size_override(
         limit_mm_per_prompt={"image": num_imgs},
         model_config_kwargs=_MODEL_CONFIG_KWARGS,
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    if isinstance(ctx.tokenizer, MistralTokenizer):
+        object.__setattr__(ctx, "tokenizer", ctx.tokenizer.transformers_tokenizer)
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config, tokenizer=ctx.tokenizer
+    )
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
 
