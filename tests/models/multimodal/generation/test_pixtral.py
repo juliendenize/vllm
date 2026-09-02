@@ -221,7 +221,7 @@ def test_hf_format_chat_tokenizer_matrix(
     local_asset_server,
 ) -> None:
     urls = [local_asset_server.url_for(IMG_URLS[0])]
-    messages = _create_msg_format_hf(urls)
+    engine_inputs = _create_engine_inputs_hf(urls)
 
     with vllm_runner(
         MISTRAL_SMALL_3_1_ID,
@@ -232,8 +232,8 @@ def test_hf_format_chat_tokenizer_matrix(
         max_model_len=8192,
         limit_mm_per_prompt={"image": 1},
     ) as vllm_model:
-        outputs = vllm_model.llm.chat(
-            messages,
+        outputs = vllm_model.llm.generate(
+            [engine_inputs],
             sampling_params=SamplingParams(max_tokens=16, temperature=0.0),
         )
 

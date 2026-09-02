@@ -59,7 +59,11 @@ class _ProcessorContext:
         hf_config: object | None = None,
     ) -> None:
         self.tokenizer = tokenizer
-        self.hf_config = hf_config or SimpleNamespace(image_token_index=2)
+        self.hf_config = hf_config or SimpleNamespace(
+            image_token_index=2,
+            vision_config=SimpleNamespace(patch_size=16),
+            spatial_merge_size=1,
+        )
         self.processor_cls: type[object] | None = None
         self.processor_kwargs: dict[str, object] | None = None
 
@@ -110,6 +114,17 @@ class _NativeChatTokenizer:
 class _NativeImageEncoder:
     special_ids = SimpleNamespace(img_break=1, img=2, img_end=3)
 
+    def __init__(
+        self,
+        image_patch_size: int = 16,
+        spatial_merge_size: int = 1,
+    ) -> None:
+        self.image_config = SimpleNamespace(
+            image_patch_size=image_patch_size,
+            max_image_size=1024,
+            spatial_merge_size=spatial_merge_size,
+        )
+
     def __call__(self, image_chunk: object) -> SimpleNamespace:
         return SimpleNamespace(image=torch.ones(3, 32, 48))
 
@@ -117,10 +132,18 @@ class _NativeImageEncoder:
         return 2, 1
 
 
-def _mistral_tokenizer() -> MistralTokenizer:
+def _mistral_tokenizer(
+    image_patch_size: int = 16,
+    spatial_merge_size: int = 1,
+) -> MistralTokenizer:
     tokenizer = object.__new__(MistralTokenizer)
     tokenizer.transformers_tokenizer = _NativeTextTokenizer()
-    tokenizer.instruct = SimpleNamespace(mm_encoder=_NativeImageEncoder())
+    tokenizer.instruct = SimpleNamespace(
+        mm_encoder=_NativeImageEncoder(
+            image_patch_size=image_patch_size,
+            spatial_merge_size=spatial_merge_size,
+        )
+    )
     return tokenizer
 
 
@@ -300,6 +323,48 @@ def test_mistral3_rejects_native_image_token_id_mismatch_at_setup() -> None:
         Mistral3ProcessingInfo(ctx).get_hf_processor()
 
 
+def test_mistral3_native_vision_info_uses_image_config() -> None:
+    info = Mistral3ProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
+
+    encoder_info = info.get_vision_encoder_info()
+
+    assert encoder_info.get_image_size() == 1024
+
+
+@pytest.mark.parametrize(
+    ("hf_config", "error_match"),
+    [
+        (
+            SimpleNamespace(
+                image_token_index=2,
+                vision_config=SimpleNamespace(patch_size=14),
+                spatial_merge_size=1,
+            ),
+            "Mistral3.*vision_config.patch_size",
+        ),
+        (
+            SimpleNamespace(
+                image_token_index=2,
+                vision_config=SimpleNamespace(patch_size=16),
+                spatial_merge_size=2,
+            ),
+            "Mistral3.*spatial_merge_size",
+        ),
+    ],
+)
+def test_mistral3_rejects_native_image_config_mismatch_at_setup(
+    hf_config: object,
+    error_match: str,
+) -> None:
+    ctx = _ProcessorContext(
+        _mistral_tokenizer(image_patch_size=16, spatial_merge_size=1),
+        hf_config=hf_config,
+    )
+
+    with pytest.raises(ValueError, match=error_match):
+        Mistral3ProcessingInfo(ctx).get_hf_processor()
+
+
 def test_mistral3_keeps_hf_processor_for_hf_tokenizer() -> None:
     ctx = _ProcessorContext(object())
     info = Mistral3ProcessingInfo(ctx)
@@ -380,6 +445,23 @@ def test_native_pixtral_processor_tokenizes_text_and_images() -> None:
     assert output["images"][0].shape == (3, 32, 48)
     assert output["images"][0].dtype == torch.float32
     assert processor.tokenizer.kwargs["add_special_tokens"] is False
+
+
+def test_native_pixtral_processor_accepts_size() -> None:
+    processor = _native_pixtral_processor()
+    image = Image.new("RGB", (48, 32))
+
+    output = processor(
+        images=[image],
+        size={"longest_edge": 448},
+    )
+    image_output = processor.image_processor(
+        images=[image],
+        size={"longest_edge": 448},
+    )
+
+    assert output["images"][0].shape == (3, 32, 48)
+    assert image_output["images"][0].shape == (3, 32, 48)
 
 
 def test_mistral3_normalizes_native_images_to_pixel_values() -> None:
@@ -485,6 +567,12 @@ def test_mistral3_native_prompt_updates_do_not_replace_full_grid() -> None:
     native_processor = _native_pixtral_processor()
     config = Mistral3Config()
     config.image_token_index = native_processor.image_token_id
+    config.vision_config.patch_size = (
+        native_processor.image_processor.mm_encoder.image_config.image_patch_size
+    )
+    config.spatial_merge_size = (
+        native_processor.image_processor.mm_encoder.image_config.spatial_merge_size
+    )
     multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
     multimodal_processor.info = SimpleNamespace(
         get_hf_processor=lambda **kwargs: native_processor,

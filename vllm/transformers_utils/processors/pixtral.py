@@ -25,12 +25,6 @@ class MistralCommonImageProcessor(ImageProcessingMixin):
         return_tensors: str | TensorType | None = None,
         size: object = None,
     ) -> BatchFeature:
-        if size is not None:
-            raise ValueError(
-                "Mistral tokenizer mode does not support `size` for native "
-                "Pixtral image processing."
-            )
-
         images_lst = [images] if not isinstance(images, list) else images
 
         images_processed = list[torch.Tensor]()
@@ -95,12 +89,6 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
         return_tensors: str | TensorType | None = None,
         **kwargs: object,
     ) -> BatchFeature:
-        if "size" in kwargs:
-            raise ValueError(
-                "Mistral tokenizer mode does not support `size` for native "
-                "Pixtral processing."
-            )
-
         outputs = dict[str, object]()
         if text is not None:
             text_keys = (

@@ -270,6 +270,28 @@ class LlavaLikeProcessor(Protocol):
     image_token: Final[str]
 
 
+def _validate_pixtral_hf_native_image_config(
+    processor: MistralCommonPixtralProcessor,
+    hf_config: LlavaLikeConfig,
+) -> None:
+    image_config = processor.image_processor.mm_encoder.image_config
+    expected_patch_size = hf_config.vision_config.patch_size
+    if image_config.image_patch_size != expected_patch_size:
+        raise ValueError(
+            "Llava native Pixtral processing has incompatible image patch size "
+            f"{image_config.image_patch_size}; expected architecture "
+            f"vision_config.patch_size={expected_patch_size}."
+        )
+
+    expected_spatial_merge_size = getattr(hf_config, "spatial_merge_size", 1)
+    if image_config.spatial_merge_size != expected_spatial_merge_size:
+        raise ValueError(
+            "Llava native Pixtral processing has incompatible "
+            f"spatial_merge_size {image_config.spatial_merge_size}; expected "
+            f"architecture spatial_merge_size={expected_spatial_merge_size}."
+        )
+
+
 class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> LlavaLikeConfig:
         return self.ctx.get_hf_config(LlavaConfig)
@@ -503,6 +525,7 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
                     f"token id {processor.image_token_id}; expected architecture "
                     f"image_token_index={hf_config.image_token_index}."
                 )
+            _validate_pixtral_hf_native_image_config(processor, hf_config)
             return processor
 
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
@@ -647,6 +670,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
                     f"token id {image_token_id}; expected architecture "
                     f"image_token_index={hf_config.image_token_index}."
                 )
+            _validate_pixtral_hf_native_image_config(processor, hf_config)
         else:
             vocab = tokenizer.get_vocab()
             image_break_id = vocab[processor.image_break_token]

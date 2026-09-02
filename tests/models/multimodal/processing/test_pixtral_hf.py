@@ -149,6 +149,41 @@ def test_pixtral_hf_rejects_native_image_token_id_mismatch_at_setup() -> None:
         PixtralHFProcessingInfo(ctx).get_hf_processor()
 
 
+@pytest.mark.parametrize(
+    ("hf_config", "tokenizer_kwargs", "error_match"),
+    [
+        (
+            SimpleNamespace(
+                image_token_index=2,
+                vision_config=SimpleNamespace(patch_size=14),
+            ),
+            {"image_patch_size": 16},
+            "Llava.*vision_config.patch_size",
+        ),
+        (
+            SimpleNamespace(
+                image_token_index=2,
+                vision_config=SimpleNamespace(patch_size=16),
+            ),
+            {"spatial_merge_size": 2},
+            "Llava.*spatial_merge_size",
+        ),
+    ],
+)
+def test_pixtral_hf_rejects_native_image_config_mismatch_at_setup(
+    hf_config: object,
+    tokenizer_kwargs: dict[str, int],
+    error_match: str,
+) -> None:
+    ctx = _ProcessorContext(
+        _mistral_tokenizer(**tokenizer_kwargs),
+        hf_config=hf_config,
+    )
+
+    with pytest.raises(ValueError, match=error_match):
+        PixtralHFProcessingInfo(ctx).get_hf_processor()
+
+
 def test_llava_keeps_hf_processor_for_non_pixtral_vision() -> None:
     ctx = _ProcessorContext(object())
     info = LlavaProcessingInfo(ctx)

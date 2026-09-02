@@ -163,6 +163,28 @@ def _validate_mistral3_pixel_values(
     return pixel_values
 
 
+def _validate_mistral3_native_image_config(
+    processor: MistralCommonPixtralProcessor,
+    hf_config: Mistral3Config,
+) -> None:
+    image_config = processor.image_processor.mm_encoder.image_config
+    expected_patch_size = hf_config.vision_config.patch_size
+    if image_config.image_patch_size != expected_patch_size:
+        raise ValueError(
+            "Mistral3 native Pixtral processing has incompatible image patch "
+            f"size {image_config.image_patch_size}; expected architecture "
+            f"vision_config.patch_size={expected_patch_size}."
+        )
+
+    expected_spatial_merge_size = hf_config.spatial_merge_size
+    if image_config.spatial_merge_size != expected_spatial_merge_size:
+        raise ValueError(
+            "Mistral3 native Pixtral processing has incompatible "
+            f"spatial_merge_size {image_config.spatial_merge_size}; expected "
+            f"architecture spatial_merge_size={expected_spatial_merge_size}."
+        )
+
+
 class Mistral3ImagePixelInputs(TensorSchema):
     """
     Dimensions:
@@ -328,7 +350,9 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
     ) -> Mistral3HFEncoderInfo:
         processor = self.get_hf_processor()
         if isinstance(processor, MistralCommonPixtralProcessor):
-            image_size = processor.image_processor.mm_encoder.mm_config.max_image_size
+            image_size = (
+                processor.image_processor.mm_encoder.image_config.max_image_size
+            )
             return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
 
         size = processor.image_processor.size
@@ -368,6 +392,7 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
                     f"token id {processor.image_token_id}; expected architecture "
                     f"image_token_index={hf_config.image_token_index}."
                 )
+            _validate_mistral3_native_image_config(processor, hf_config)
             return processor
 
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
@@ -618,6 +643,7 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
                     f"token id {image_token_id}; expected architecture "
                     f"image_token_index={hf_config.image_token_index}."
                 )
+            _validate_mistral3_native_image_config(processor, hf_config)
         else:
             vocab = tokenizer.get_vocab()
             image_break_id = vocab[processor.image_break_token]
