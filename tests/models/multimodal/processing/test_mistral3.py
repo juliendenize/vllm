@@ -429,6 +429,7 @@ def test_mistral3_native_dummy_inputs_match_cache_paths(
         uncached_data = uncached_output["mm_kwargs"].get_data()
         assert cached_data.keys() == uncached_data.keys()
         for key in cached_data:
+            assert len(cached_data[key]) == len(uncached_data[key])
             for cached_value, uncached_value in zip(
                 cached_data[key], uncached_data[key]
             ):
