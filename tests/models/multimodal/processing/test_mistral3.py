@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Mistral3's multimodal preprocessing."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import cast
 
@@ -10,7 +10,7 @@ import pytest
 import torch
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
-from transformers import BatchFeature, Mistral3Config
+from transformers import AutoProcessor, BatchFeature, Mistral3Config
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
@@ -40,6 +40,7 @@ from vllm.transformers_utils.processors.pixtral import (
     MistralCommonPixtralProcessor,
 )
 
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import build_model_context
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -134,19 +135,34 @@ def _native_pixtral_processor() -> MistralCommonPixtralProcessor:
 def _build_mistral3_processing_context(
     tokenizer_mode: str,
 ) -> InputProcessingContext:
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(_MODEL_ID)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
     model_config = ModelConfig(
         _MODEL_ID,
         tokenizer=_MODEL_ID,
         tokenizer_mode=tokenizer_mode,
         config_format="hf",
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         dtype="auto",
         seed=0,
         limit_mm_per_prompt={"image": 2},
+        hf_overrides=model_info.hf_overrides,
     )
-    return InputProcessingContext(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
+    tokenizer = cached_tokenizer_from_config(model_config)
+    if tokenizer_mode == "hf":
+        tokenizer = AutoProcessor.from_pretrained(
+            _MODEL_ID,
+            revision=model_info.revision,
+            trust_remote_code=model_info.trust_remote_code,
+        ).tokenizer
+
+    return InputProcessingContext(model_config, tokenizer=tokenizer)
 
 
 @pytest.mark.parametrize(
@@ -204,30 +220,39 @@ def test_mistral3_hf_format_tokenizer_matrix(
         return
 
     images = [Image.new("RGB", (448, 448)), Image.new("RGB", (448, 672))]
-    processed = cast(Callable[..., BatchFeature], hf_processor)(
-        images=images,
-        return_tensors="pt",
+    processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"image": 2},
+        mm_options={},
+        mm_data={"image": images},
     )
-    output = processor._postprocess_hf_mm_data(
-        {"images": images},
-        {},
-        BatchFeature(processed),
-    )
-    assert set(output) == {"pixel_values", "image_sizes"}
-    assert [tuple(value.shape) for value in output["pixel_values"]] == [
+    output = processor.apply(processor_inputs, TimingContext(enabled=False))
+    mm_data = output["mm_kwargs"].get_data()
+    expected_patch_counts = [
+        _expected_placeholder_tokens_per_image(hf_processor, value)
+        for value in mm_data["pixel_values"]
+    ]
+
+    assert set(output) == {
+        "type",
+        "prompt_token_ids",
+        "mm_kwargs",
+        "mm_placeholders",
+        "mm_hashes",
+    }
+    assert output["type"] == "multimodal"
+    assert set(mm_data) == {"pixel_values"}
+    assert [tuple(value.shape) for value in mm_data["pixel_values"]] == [
         (3, 448, 448),
         (3, 672, 448),
     ]
-    assert tuple(output["image_sizes"].shape) == (2, 2)
-    assert _placeholder_count_from_prompt_updates(
-        processor,
-        images,
-        output["pixel_values"],
-        {},
-    ) == sum(
-        _expected_placeholder_tokens_per_image(hf_processor, value)
-        for value in output["pixel_values"]
-    )
+    assert len(output["mm_hashes"]["image"]) == len(images)
+    assert [
+        item.get_num_embeds() for item in output["mm_placeholders"]["image"]
+    ] == expected_patch_counts
+    assert output["prompt_token_ids"].count(
+        ctx.model_config.hf_config.image_token_index
+    ) == sum(expected_patch_counts)
 
 
 class _NativeDummyInfo:

@@ -20,6 +20,8 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
 from vllm.utils.mistral import is_mistral_tokenizer
 
+from ..models.registry import HF_EXAMPLE_MODELS
+
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 HF_MISTRAL3_MODEL_NAME = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 pytestmark = pytest.mark.skip_global_cleanup
@@ -100,13 +102,23 @@ def test_hf_mistral3_renderer_tokenizer_matrix(
     uses_mistral_tokenizer: bool,
     processor_type: type[object],
 ) -> None:
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(HF_MISTRAL3_MODEL_NAME)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
     model_config = ModelConfig(
         HF_MISTRAL3_MODEL_NAME,
         tokenizer=HF_MISTRAL3_MODEL_NAME,
         tokenizer_mode=tokenizer_mode,
         config_format="hf",
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         dtype="auto",
         seed=0,
+        hf_overrides=model_info.hf_overrides,
     )
     renderer = cast(
         HfRenderer | MistralRenderer,
@@ -125,7 +137,7 @@ def test_hf_mistral3_renderer_tokenizer_matrix(
         assert type(renderer) is MistralRenderer
     assert is_mistral_tokenizer(renderer.tokenizer) == uses_mistral_tokenizer
     assert renderer.mm_processor is not None
-    assert isinstance(renderer.mm_processor.info.get_hf_processor(), processor_type)
+    assert type(renderer.mm_processor.info.get_hf_processor()) is processor_type
 
 
 @pytest.mark.asyncio
