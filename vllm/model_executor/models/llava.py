@@ -7,6 +7,9 @@ from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
+from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from transformers import (
     BatchFeature,
     CLIPVisionConfig,
@@ -320,6 +323,9 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         num_images = mm_counts.get("image", 0)
 
         processor = self.info.get_hf_processor()
+        if isinstance(processor, MistralCommonPixtralProcessor):
+            return ""
+
         image_token = processor.image_token
 
         return image_token * num_images
@@ -344,6 +350,60 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                 overrides=image_overrides,
             )
         }
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+        mm_data: MultiModalDataDict | None = None,
+    ) -> ProcessorInputs:
+        processor = self.info.get_hf_processor()
+        if not isinstance(processor, MistralCommonPixtralProcessor):
+            if mm_data is not None:
+                dummy_mm_items = self.info.parse_mm_data(mm_data, validate=False)
+                tokenizer = self.info.ctx.tokenizer
+                dummy_prompt = (
+                    []
+                    if tokenizer is None
+                    else tokenizer.encode(
+                        self.get_dummy_text(mm_counts),
+                        truncation=False,
+                    )
+                )
+                return ProcessorInputs(
+                    prompt=dummy_prompt,
+                    mm_data_items=dummy_mm_items,
+                )
+
+            return super().get_dummy_processor_inputs(
+                seq_len=seq_len,
+                mm_counts=mm_counts,
+                mm_options=mm_options,
+            )
+
+        dummy_mm_data = (
+            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+            if mm_data is None
+            else mm_data
+        )
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+        images = dummy_mm_items["image"].get_all()
+        request = ChatCompletionRequest(
+            messages=[
+                UserMessage(
+                    content=[
+                        TextChunk(text=""),
+                        *(ImageChunk(image=image) for image in images),
+                    ]
+                )
+            ]
+        )
+        dummy_prompt = (
+            self.info.get_tokenizer().mistral.encode_chat_completion(request).tokens
+        )
+
+        return ProcessorInputs(prompt=dummy_prompt, mm_data_items=dummy_mm_items)
 
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
