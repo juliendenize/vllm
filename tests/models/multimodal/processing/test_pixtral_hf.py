@@ -21,7 +21,9 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
+from vllm.transformers_utils.processors.pixtral import (
+    MistralCommonPixtralHFProcessor,
+)
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...registry import HF_EXAMPLE_MODELS
@@ -74,8 +76,8 @@ def _build_pixtral_context(
     ("tokenizer_mode", "processor_type"),
     [
         ("hf", PixtralProcessor),
-        ("mistral", MistralCommonPixtralProcessor),
-        ("auto", MistralCommonPixtralProcessor),
+        ("mistral", MistralCommonPixtralHFProcessor),
+        ("auto", MistralCommonPixtralHFProcessor),
     ],
 )
 def test_pixtral_hf_tokenizer_matrix(

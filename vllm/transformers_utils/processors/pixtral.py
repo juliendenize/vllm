@@ -23,7 +23,7 @@ class MistralCommonImageProcessor(ImageProcessingMixin):
         self,
         images: ImageInput,
         return_tensors: str | TensorType | None = None,
-        size: object = None,
+        **kwargs,
     ) -> BatchFeature:
         images_lst = [images] if not isinstance(images, list) else images
 
@@ -65,9 +65,6 @@ class MistralCommonImageProcessor(ImageProcessingMixin):
 
 class MistralCommonPixtralProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
-    image_token = "[IMG]"
-    image_break_token = "[IMG_BREAK]"
-    image_end_token = "[IMG_END]"
 
     def __init__(
         self,
@@ -81,6 +78,12 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
         self.image_break_id = image_special_ids.img_break
         self.image_token_id = image_special_ids.img
         self.image_end_id = image_special_ids.img_end
+
+
+class MistralCommonPixtralHFProcessor(MistralCommonPixtralProcessor):
+    image_token = "[IMG]"
+    image_break_token = "[IMG_BREAK]"
+    image_end_token = "[IMG_END]"
 
     def __call__(
         self,

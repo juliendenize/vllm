@@ -26,6 +26,7 @@ from vllm.model_executor.models.pixtral import (
     PixtralDummyInputsBuilder,
     PixtralHFEncoderInfo,
     get_mistral_common_pixtral_dummy_inputs,
+    get_mistral_common_pixtral_processor,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
@@ -40,6 +41,7 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processors.pixtral import (
     MistralCommonImageProcessor,
+    MistralCommonPixtralHFProcessor,
     MistralCommonPixtralProcessor,
 )
 
@@ -195,8 +197,8 @@ def _build_mistral3_processing_context(
     ("tokenizer_mode", "processor_type"),
     [
         ("hf", PixtralProcessor),
-        ("mistral", MistralCommonPixtralProcessor),
-        ("auto", MistralCommonPixtralProcessor),
+        ("mistral", MistralCommonPixtralHFProcessor),
+        ("auto", MistralCommonPixtralHFProcessor),
     ],
 )
 def test_mistral3_hf_format_tokenizer_matrix(
@@ -395,7 +397,7 @@ def test_native_pixtral_processor_tokenizes_text_and_images() -> None:
     assert processor.tokenizer.kwargs["add_special_tokens"] is False
 
 
-def test_native_pixtral_processor_accepts_size() -> None:
+def test_native_pixtral_processor_accepts_image_kwargs() -> None:
     processor = _native_pixtral_processor()
     image = Image.new("RGB", (48, 32))
 
@@ -405,11 +407,29 @@ def test_native_pixtral_processor_accepts_size() -> None:
     )
     image_output = processor.image_processor(
         images=[image],
-        size={"longest_edge": 448},
+        do_resize=False,
     )
 
     assert output["images"][0].shape == (3, 32, 48)
     assert image_output["images"][0].shape == (3, 32, 48)
+
+
+def test_native_pixtral_processor_keeps_native_processor_type() -> None:
+    processor = _native_pixtral_processor()
+
+    assert type(processor) is MistralCommonPixtralProcessor
+    assert not hasattr(processor, "image_token")
+    assert not hasattr(processor, "image_break_token")
+    assert not hasattr(processor, "image_end_token")
+
+
+def test_hf_pixtral_processor_uses_hf_adapter() -> None:
+    processor = get_mistral_common_pixtral_processor(_mistral_tokenizer())
+
+    assert type(processor) is MistralCommonPixtralHFProcessor
+    assert processor.image_token == "[IMG]"
+    assert processor.image_break_token == "[IMG_BREAK]"
+    assert processor.image_end_token == "[IMG_END]"
 
 
 def test_mistral3_normalizes_native_images_to_pixel_values() -> None:

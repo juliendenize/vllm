@@ -66,6 +66,7 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processors.pixtral import (
     MistralCommonImageProcessor,
+    MistralCommonPixtralHFProcessor,
     MistralCommonPixtralProcessor,
 )
 from vllm.utils.collection_utils import is_list_of
@@ -105,11 +106,11 @@ PATCH_MERGE = "patch_merge"
 
 def get_mistral_common_pixtral_processor(
     tokenizer: object | None,
-) -> MistralCommonPixtralProcessor | None:
+) -> MistralCommonPixtralHFProcessor | None:
     if not isinstance(tokenizer, MistralTokenizer):
         return None
 
-    return MistralCommonPixtralProcessor(
+    return MistralCommonPixtralHFProcessor(
         tokenizer=tokenizer,
         image_processor=MistralCommonImageProcessor(tokenizer.instruct.mm_encoder),
     )
