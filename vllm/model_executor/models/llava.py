@@ -431,6 +431,13 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
             image_sizes = processed_data["image_sizes"]
+            if len(pixel_values) != len(image_sizes):
+                raise ValueError(
+                    "Llava Pixtral pixel_values and image_sizes must contain "
+                    f"the same number of images, got {len(pixel_values)} and "
+                    f"{len(image_sizes)}."
+                )
+
             processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]

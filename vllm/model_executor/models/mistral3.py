@@ -406,6 +406,13 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
             image_sizes = processed_data["image_sizes"]
+            if len(pixel_values) != len(image_sizes):
+                raise ValueError(
+                    "Mistral3 pixel_values and image_sizes must contain the "
+                    f"same number of images, got {len(pixel_values)} and "
+                    f"{len(image_sizes)}."
+                )
+
             processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]
@@ -641,10 +648,7 @@ class Mistral3ForConditionalGeneration(
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
-        if image_embeds is not None:
-            raise ValueError("Mistral3 does not support `image_embeds` inputs.")
-
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
 
         return Mistral3ImagePixelInputs(
