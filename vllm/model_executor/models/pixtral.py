@@ -11,6 +11,7 @@ import torch.nn as nn
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from PIL import Image
 from transformers import BatchFeature, PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
@@ -100,6 +101,55 @@ except ImportError:
     USE_XFORMERS_OPS = False
 
 PATCH_MERGE = "patch_merge"
+
+
+def get_mistral_common_pixtral_processor(
+    tokenizer: object | None,
+) -> MistralCommonPixtralProcessor | None:
+    if not isinstance(tokenizer, MistralTokenizer):
+        return None
+
+    return MistralCommonPixtralProcessor(
+        tokenizer=tokenizer,
+        image_processor=MistralCommonImageProcessor(tokenizer.instruct.mm_encoder),
+    )
+
+
+def render_mistral_common_pixtral_prompt(
+    tokenizer: object,
+    images: Sequence[Image.Image],
+) -> list[int]:
+    request = ChatCompletionRequest(
+        messages=[
+            UserMessage(
+                content=[
+                    TextChunk(text=""),
+                    *(ImageChunk(image=image) for image in images),
+                ]
+            )
+        ]
+    )
+    return tokenizer.mistral.encode_chat_completion(request).tokens
+
+
+def get_mistral_common_pixtral_prompt_update(
+    processor: MistralCommonPixtralProcessor,
+    *,
+    image_height: int,
+    image_width: int,
+) -> PromptUpdateDetails:
+    _, nrows, ncols = processor.image_processor.get_number_of_image_patches(
+        height=image_height,
+        width=image_width,
+    )
+    tokens = ([processor.image_token_id] * ncols + [processor.image_break_id]) * nrows
+    tokens[-1] = processor.image_end_id
+    return PromptUpdateDetails.select_token_id(tokens, processor.image_token_id)
+
+
+def adapt_mistral_common_pixtral_output(processed_data: BatchFeature) -> BatchFeature:
+    processed_data["pixel_values"] = processed_data.pop("images")
+    return processed_data
 
 
 def _is_layer_none_or_staged(layer: nn.Module) -> bool:

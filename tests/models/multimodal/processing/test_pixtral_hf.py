@@ -138,6 +138,15 @@ def test_pixtral_hf_selects_native_processor_for_mistral_tokenizer() -> None:
     assert isinstance(processor, MistralCommonPixtralProcessor)
 
 
+def test_pixtral_hf_keeps_hf_processor_without_tokenizer() -> None:
+    ctx = _ProcessorContext(None)
+    info = PixtralHFProcessingInfo(ctx)
+
+    info.get_hf_processor()
+
+    assert ctx.processor_cls is PixtralProcessor
+
+
 def test_llava_keeps_hf_processor_for_non_pixtral_vision() -> None:
     ctx = _ProcessorContext(object())
     info = LlavaProcessingInfo(ctx)

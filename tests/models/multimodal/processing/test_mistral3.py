@@ -67,6 +67,10 @@ class _ProcessorContext:
         self.processor_kwargs: dict[str, object] | None = None
 
     def get_tokenizer(self) -> object:
+        if self.tokenizer is None:
+            raise ValueError(
+                "You cannot pass text prompts when `skip_tokenizer_init=True`"
+            )
         return self.tokenizer
 
     def get_merged_mm_kwargs(
@@ -327,6 +331,16 @@ def test_mistral3_keeps_hf_processor_for_hf_tokenizer() -> None:
 
     info.get_hf_processor(size={"longest_edge": 448})
 
+    assert ctx.processor_kwargs == {"size": {"longest_edge": 448}}
+
+
+def test_mistral3_keeps_hf_processor_without_tokenizer() -> None:
+    ctx = _ProcessorContext(None)
+    info = Mistral3ProcessingInfo(ctx)
+
+    info.get_hf_processor(size={"longest_edge": 448})
+
+    assert ctx.processor_cls is PixtralProcessor
     assert ctx.processor_kwargs == {"size": {"longest_edge": 448}}
 
 

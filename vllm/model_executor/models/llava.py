@@ -7,9 +7,6 @@ from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
-from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from transformers import (
     BatchFeature,
     CLIPVisionConfig,
@@ -57,10 +54,8 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.pixtral import (
-    MistralCommonImageProcessor,
     MistralCommonPixtralProcessor,
 )
-from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
@@ -73,7 +68,14 @@ from .interfaces import (
     SupportsPP,
 )
 from .module_mapping import MultiModelKeys
-from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
+from .pixtral import (
+    PixtralHFEncoderInfo,
+    PixtralHFVisionModel,
+    adapt_mistral_common_pixtral_output,
+    get_mistral_common_pixtral_processor,
+    get_mistral_common_pixtral_prompt_update,
+    render_mistral_common_pixtral_prompt,
+)
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
@@ -303,18 +305,9 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         )
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
         images = dummy_mm_items["image"].get_all()
-        request = ChatCompletionRequest(
-            messages=[
-                UserMessage(
-                    content=[
-                        TextChunk(text=""),
-                        *(ImageChunk(image=image) for image in images),
-                    ]
-                )
-            ]
-        )
-        dummy_prompt = (
-            self.info.get_tokenizer().mistral.encode_chat_completion(request).tokens
+        dummy_prompt = render_mistral_common_pixtral_prompt(
+            tokenizer=self.info.get_tokenizer(),
+            images=images,
         )
 
         return ProcessorInputs(prompt=dummy_prompt, mm_data_items=dummy_mm_items)
@@ -389,21 +382,16 @@ class LlavaMultiModalProcessor(BaseLlavaMultiModalProcessor[LlavaProcessingInfo]
 
 class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
-        tokenizer = self.get_tokenizer()
-        if is_mistral_tokenizer(tokenizer):
-            try:
-                processor = MistralCommonPixtralProcessor(
-                    tokenizer=tokenizer,
-                    image_processor=MistralCommonImageProcessor(
-                        tokenizer.instruct.mm_encoder
-                    ),
-                )
-            except (AttributeError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    "Llava Pixtral vision processing cannot construct the native "
-                    "Pixtral processor for `tokenizer_mode=mistral`."
-                ) from exc
+        tokenizer = self.ctx.tokenizer
+        try:
+            processor = get_mistral_common_pixtral_processor(tokenizer)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Llava Pixtral vision processing cannot construct the native "
+                "Pixtral processor for `tokenizer_mode=mistral`."
+            ) from exc
 
+        if processor is not None:
             return processor
 
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
@@ -424,7 +412,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         if isinstance(processor, MistralCommonPixtralProcessor):
-            processed_data["pixel_values"] = processed_data.pop("images")
+            processed_data = adapt_mistral_common_pixtral_output(processed_data)
 
         pixel_values = processed_data.get("pixel_values")
         if pixel_values is not None and "image_sizes" in processed_data:
@@ -503,9 +491,10 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
             image_size = images.get_image_size(item_idx)
 
             if isinstance(processor, MistralCommonPixtralProcessor):
-                _, nrows, ncols = processor.image_processor.get_number_of_image_patches(
-                    height=image_size.height,
-                    width=image_size.width,
+                return get_mistral_common_pixtral_prompt_update(
+                    processor,
+                    image_height=image_size.height,
+                    image_width=image_size.width,
                 )
             else:
                 ncols, nrows = encoder_info.get_patch_grid_size(
