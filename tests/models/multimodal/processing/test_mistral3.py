@@ -10,7 +10,7 @@ import pytest
 import torch
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
-from transformers import AutoProcessor, BatchFeature, Mistral3Config
+from transformers import AutoProcessor, BatchFeature
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
@@ -484,7 +484,7 @@ def test_mistral3_hf_rejects_pixel_values_image_sizes_mismatch() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match="same number of images"):
+    with pytest.raises(AssertionError):
         multimodal_processor._postprocess_hf_mm_data(
             {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
         )
@@ -505,20 +505,9 @@ def test_mistral3_hf_requires_image_sizes_for_pixel_values() -> None:
 
 def test_mistral3_native_prompt_updates_do_not_replace_full_grid() -> None:
     native_processor = _native_pixtral_processor()
-    config = Mistral3Config()
-    config.image_token_index = native_processor.image_token_id
-    config.vision_config.patch_size = (
-        native_processor.image_processor.mm_encoder.image_config.image_patch_size
-    )
-    config.spatial_merge_size = (
-        native_processor.image_processor.mm_encoder.image_config.spatial_merge_size
-    )
     multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
     multimodal_processor.info = SimpleNamespace(
         get_hf_processor=lambda **kwargs: native_processor,
-        get_hf_config=lambda: config,
-        get_tokenizer=lambda: _mistral_tokenizer(),
-        get_vision_encoder_info=lambda kwargs: object(),
     )
     images = SimpleNamespace(
         get_image_size=lambda item_idx: SimpleNamespace(width=48, height=32)

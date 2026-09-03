@@ -16,7 +16,7 @@ from vllm.renderers import ChatParams, renderer_from_config
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
+from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralHFProcessor
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -64,8 +64,8 @@ class MockVllmConfig:
     ("tokenizer_mode", "uses_mistral_tokenizer", "processor_type"),
     [
         ("hf", False, PixtralProcessor),
-        ("mistral", True, MistralCommonPixtralProcessor),
-        ("auto", True, MistralCommonPixtralProcessor),
+        ("mistral", True, MistralCommonPixtralHFProcessor),
+        ("auto", True, MistralCommonPixtralHFProcessor),
     ],
 )
 def test_hf_mistral3_renderer_tokenizer_matrix(

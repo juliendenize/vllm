@@ -242,12 +242,13 @@ def test_hf_format_chat_tokenizer_matrix(
                 _create_msg_format(urls), sampling_params=sampling_params
             )
 
+        image_token_index = (
+            vllm_model.llm.llm_engine.model_config.hf_config.image_token_index
+        )
+
     assert outputs
     assert outputs[0].outputs
     assert outputs[0].outputs[0].text
-    image_token_index = (
-        vllm_model.llm.llm_engine.model_config.hf_config.image_token_index
-    )
     assert image_token_index in outputs[0].prompt_token_ids
 
 

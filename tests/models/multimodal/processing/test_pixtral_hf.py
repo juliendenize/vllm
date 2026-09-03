@@ -231,7 +231,7 @@ def test_pixtral_hf_hf_rejects_pixel_values_image_sizes_mismatch() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match="same number of images"):
+    with pytest.raises(AssertionError):
         multimodal_processor._postprocess_hf_mm_data(
             {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
         )
@@ -248,6 +248,25 @@ def test_pixtral_hf_hf_requires_image_sizes_for_pixel_values() -> None:
         multimodal_processor._postprocess_hf_mm_data(
             {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
         )
+
+
+def test_pixtral_hf_native_prompt_updates_skip_hf_state() -> None:
+    native_processor = get_mistral_common_pixtral_processor(_mistral_tokenizer())
+    assert native_processor is not None
+    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: native_processor,
+    )
+    images = SimpleNamespace(
+        get_image_size=lambda item_idx: SimpleNamespace(width=48, height=32)
+    )
+    mm_items = SimpleNamespace(get_items=lambda modality, item_type: images)
+
+    updates = multimodal_processor._get_prompt_updates(mm_items, {}, None)
+    resolved = updates[0].resolve(0)
+
+    assert resolved.target == []
+    assert resolved.content.full.count(native_processor.image_token_id) == 2
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])

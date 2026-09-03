@@ -391,12 +391,7 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
             image_sizes = processed_data["image_sizes"]
-            if len(pixel_values) != len(image_sizes):
-                raise ValueError(
-                    "Mistral3 pixel_values and image_sizes must contain the "
-                    f"same number of images, got {len(pixel_values)} and "
-                    f"{len(image_sizes)}."
-                )
+            assert len(pixel_values) == len(image_sizes)
 
             processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
@@ -443,17 +438,31 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        if isinstance(processor, MistralCommonPixtralProcessor):
+
+            def get_replacement(item_idx: int):
+                images = mm_items.get_items("image", ImageProcessorItems)
+                image_size = images.get_image_size(item_idx)
+                return get_mistral_common_pixtral_prompt_update(
+                    processor,
+                    image_height=image_size.height,
+                    image_width=image_size.width,
+                )
+
+            return [
+                PromptReplacement(
+                    modality="image",
+                    target=[],
+                    replacement=get_replacement,
+                ),
+            ]
+
         hf_config = self.info.get_hf_config()
         tokenizer = self.info.get_tokenizer()
-        if isinstance(processor, MistralCommonPixtralProcessor):
-            image_break_id = processor.image_break_id
-            image_token_id = processor.image_token_id
-            image_end_id = processor.image_end_id
-        else:
-            vocab = tokenizer.get_vocab()
-            image_break_id = vocab[processor.image_break_token]
-            image_token_id = hf_config.image_token_index
-            image_end_id = vocab[processor.image_end_token]
+        vocab = tokenizer.get_vocab()
+        image_break_id = vocab[processor.image_break_token]
+        image_token_id = hf_config.image_token_index
+        image_end_id = vocab[processor.image_end_token]
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
         encoder_info = self.info.get_vision_encoder_info(hf_processor_mm_kwargs)
@@ -461,33 +470,20 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
-
-            if isinstance(processor, MistralCommonPixtralProcessor):
-                return get_mistral_common_pixtral_prompt_update(
-                    processor,
-                    image_height=image_size.height,
-                    image_width=image_size.width,
-                )
-            else:
-                ncols, nrows = encoder_info.get_patch_grid_size(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                )
+            ncols, nrows = encoder_info.get_patch_grid_size(
+                image_width=image_size.width,
+                image_height=image_size.height,
+            )
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
             tokens[-1] = image_end_id
 
             return PromptUpdateDetails.select_token_id(tokens, image_token_id)
 
-        replacement_target = (
-            []
-            if isinstance(processor, MistralCommonPixtralProcessor)
-            else [image_token_id]
-        )
         return [
             PromptReplacement(
                 modality="image",
-                target=replacement_target,
+                target=[image_token_id],
                 replacement=get_replacement,
             ),
         ]
