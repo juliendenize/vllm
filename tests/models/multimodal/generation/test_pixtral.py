@@ -245,6 +245,10 @@ def test_hf_format_chat_tokenizer_matrix(
     assert outputs
     assert outputs[0].outputs
     assert outputs[0].outputs[0].text
+    image_token_index = (
+        vllm_model.llm.llm_engine.model_config.hf_config.image_token_index
+    )
+    assert image_token_index in outputs[0].prompt_token_ids
 
 
 @large_gpu_test(min_gb=16)
