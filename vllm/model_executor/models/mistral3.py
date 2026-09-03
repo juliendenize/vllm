@@ -387,10 +387,10 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         if isinstance(processor, MistralCommonPixtralProcessor):
-            processed_data = adapt_mistral_common_pixtral_output(processed_data)
+            return adapt_mistral_common_pixtral_output(processed_data)
 
         pixel_values = processed_data.get("pixel_values")
-        if pixel_values is not None and "image_sizes" in processed_data:
+        if pixel_values is not None:
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
             image_sizes = processed_data["image_sizes"]

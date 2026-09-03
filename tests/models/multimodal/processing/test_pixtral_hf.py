@@ -223,7 +223,14 @@ def test_pixtral_hf_normalizes_native_images_to_pixel_values() -> None:
         get_hf_processor=lambda **kwargs: native_processor
     )
     native_images = [torch.ones(1, 3, 32, 48)]
-    processed_data = BatchFeature({"images": native_images})
+
+    class NativeBatchFeature(BatchFeature):
+        def __contains__(self, key: object) -> bool:
+            if key == "image_sizes":
+                raise AssertionError("native output must not access image_sizes")
+            return super().__contains__(key)
+
+    processed_data = NativeBatchFeature({"images": native_images})
 
     output = multimodal_processor._postprocess_hf_mm_data(
         {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
@@ -231,6 +238,54 @@ def test_pixtral_hf_normalizes_native_images_to_pixel_values() -> None:
 
     assert output["pixel_values"] is native_images
     assert "images" not in output
+
+
+def test_pixtral_hf_hf_crops_pixel_values_to_image_sizes() -> None:
+    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: SimpleNamespace()
+    )
+    pixel_values = [torch.arange(20).reshape(1, 4, 5)]
+    processed_data = BatchFeature(
+        {"pixel_values": pixel_values, "image_sizes": [(2, 3)]}
+    )
+
+    output = multimodal_processor._postprocess_hf_mm_data(
+        {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
+    )
+
+    torch.testing.assert_close(output["pixel_values"][0], pixel_values[0][:, :2, :3])
+
+
+def test_pixtral_hf_hf_rejects_pixel_values_image_sizes_mismatch() -> None:
+    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: SimpleNamespace()
+    )
+    processed_data = BatchFeature(
+        {
+            "pixel_values": [torch.ones(1, 4, 5), torch.ones(1, 4, 5)],
+            "image_sizes": [(2, 3)],
+        }
+    )
+
+    with pytest.raises(ValueError, match="same number of images"):
+        multimodal_processor._postprocess_hf_mm_data(
+            {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
+        )
+
+
+def test_pixtral_hf_hf_requires_image_sizes_for_pixel_values() -> None:
+    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
+    multimodal_processor.info = SimpleNamespace(
+        get_hf_processor=lambda **kwargs: SimpleNamespace()
+    )
+    processed_data = BatchFeature({"pixel_values": [torch.ones(1, 4, 5)]})
+
+    with pytest.raises(KeyError, match="image_sizes"):
+        multimodal_processor._postprocess_hf_mm_data(
+            {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
+        )
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])
