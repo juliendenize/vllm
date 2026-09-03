@@ -30,7 +30,6 @@ from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (
     InputProcessingContext,
-    ProcessorInputs,
     TimingContext,
 )
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -314,52 +313,12 @@ def test_mistral3_selects_native_processor_for_mistral_tokenizer() -> None:
     assert ctx.processor_cls is None
 
 
-def test_mistral3_does_not_validate_native_image_token_id_at_setup() -> None:
-    ctx = _ProcessorContext(
-        _mistral_tokenizer(), hf_config=SimpleNamespace(image_token_index=99)
-    )
-
-    assert isinstance(
-        Mistral3ProcessingInfo(ctx).get_hf_processor(),
-        MistralCommonPixtralProcessor,
-    )
-
-
 def test_mistral3_native_vision_info_uses_image_config() -> None:
     info = Mistral3ProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
 
     encoder_info = info.get_vision_encoder_info()
 
     assert encoder_info.get_image_size() == 1024
-
-
-@pytest.mark.parametrize(
-    "hf_config",
-    [
-        SimpleNamespace(
-            image_token_index=2,
-            vision_config=SimpleNamespace(patch_size=14),
-            spatial_merge_size=1,
-        ),
-        SimpleNamespace(
-            image_token_index=2,
-            vision_config=SimpleNamespace(patch_size=16),
-            spatial_merge_size=2,
-        ),
-    ],
-)
-def test_mistral3_does_not_validate_native_image_config_at_setup(
-    hf_config: object,
-) -> None:
-    ctx = _ProcessorContext(
-        _mistral_tokenizer(image_patch_size=16, spatial_merge_size=1),
-        hf_config=hf_config,
-    )
-
-    assert isinstance(
-        Mistral3ProcessingInfo(ctx).get_hf_processor(),
-        MistralCommonPixtralProcessor,
-    )
 
 
 def test_mistral3_keeps_hf_processor_for_hf_tokenizer() -> None:
@@ -476,30 +435,6 @@ def test_mistral3_normalizes_native_images_to_pixel_values() -> None:
 
     assert output["pixel_values"] is native_images
     assert "images" not in output
-
-
-def test_mistral3_rejects_size_for_native_tokenizer() -> None:
-    processor = object.__new__(Mistral3MultiModalProcessor)
-    processor.info = Mistral3ProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
-
-    with pytest.raises(ValueError, match="Mistral tokenizer mode.*size"):
-        processor.validate_mm_processor_kwargs({"size": {"longest_edge": 448}})
-
-
-def test_mistral3_apply_rejects_size_before_cache_hashing() -> None:
-    processor = object.__new__(Mistral3MultiModalProcessor)
-    processor.info = Mistral3ProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
-    processor._cached_apply_hf_processor = lambda *args, **kwargs: pytest.fail(
-        "cache processing must not run for rejected kwargs"
-    )
-    inputs = ProcessorInputs(
-        prompt=[],
-        mm_data_items={},
-        hf_processor_mm_kwargs={"size": {"longest_edge": 448}},
-    )
-
-    with pytest.raises(ValueError, match="Mistral tokenizer mode.*size"):
-        processor.apply(inputs, TimingContext(enabled=False))
 
 
 def test_mistral3_native_prompt_updates_do_not_replace_full_grid() -> None:

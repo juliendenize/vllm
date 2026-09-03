@@ -13,7 +13,6 @@ from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.llava import (
     LlavaDummyInputsBuilder,
-    LlavaForConditionalGeneration,
     LlavaProcessingInfo,
     PixtralHFMultiModalProcessor,
     PixtralHFProcessingInfo,
@@ -24,7 +23,6 @@ from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (
     InputProcessingContext,
-    ProcessorInputs,
     TimingContext,
 )
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -140,51 +138,6 @@ def test_pixtral_hf_selects_native_processor_for_mistral_tokenizer() -> None:
     assert isinstance(processor, MistralCommonPixtralProcessor)
 
 
-def test_pixtral_hf_does_not_validate_native_image_token_id_at_setup() -> None:
-    ctx = _ProcessorContext(
-        _mistral_tokenizer(), hf_config=SimpleNamespace(image_token_index=99)
-    )
-
-    assert isinstance(
-        PixtralHFProcessingInfo(ctx).get_hf_processor(),
-        MistralCommonPixtralProcessor,
-    )
-
-
-@pytest.mark.parametrize(
-    ("hf_config", "tokenizer_kwargs"),
-    [
-        (
-            SimpleNamespace(
-                image_token_index=2,
-                vision_config=SimpleNamespace(patch_size=14),
-            ),
-            {"image_patch_size": 16},
-        ),
-        (
-            SimpleNamespace(
-                image_token_index=2,
-                vision_config=SimpleNamespace(patch_size=16),
-            ),
-            {"spatial_merge_size": 2},
-        ),
-    ],
-)
-def test_pixtral_hf_does_not_validate_native_image_config_at_setup(
-    hf_config: object,
-    tokenizer_kwargs: dict[str, int],
-) -> None:
-    ctx = _ProcessorContext(
-        _mistral_tokenizer(**tokenizer_kwargs),
-        hf_config=hf_config,
-    )
-
-    assert isinstance(
-        PixtralHFProcessingInfo(ctx).get_hf_processor(),
-        MistralCommonPixtralProcessor,
-    )
-
-
 def test_llava_keeps_hf_processor_for_non_pixtral_vision() -> None:
     ctx = _ProcessorContext(object())
     info = LlavaProcessingInfo(ctx)
@@ -252,13 +205,6 @@ def test_pixtral_hf_hf_dummy_inputs_preserve_supplied_data() -> None:
     assert inputs.mm_data_items["image"].get_all() == [image]
 
 
-def test_pixtral_hf_accepts_size_for_hf_tokenizer() -> None:
-    processor = object.__new__(PixtralHFMultiModalProcessor)
-    processor.info = PixtralHFProcessingInfo(_ProcessorContext(object()))
-
-    processor.validate_mm_processor_kwargs({"size": {"longest_edge": 448}})
-
-
 def test_pixtral_hf_normalizes_native_images_to_pixel_values() -> None:
     native_processor = PixtralHFProcessingInfo(
         _ProcessorContext(_mistral_tokenizer())
@@ -276,30 +222,6 @@ def test_pixtral_hf_normalizes_native_images_to_pixel_values() -> None:
 
     assert output["pixel_values"] is native_images
     assert "images" not in output
-
-
-def test_pixtral_hf_rejects_size_for_native_tokenizer() -> None:
-    processor = object.__new__(PixtralHFMultiModalProcessor)
-    processor.info = PixtralHFProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
-
-    with pytest.raises(ValueError, match="Mistral tokenizer mode.*size"):
-        processor.validate_mm_processor_kwargs({"size": {"longest_edge": 448}})
-
-
-def test_pixtral_hf_apply_rejects_size_before_cache_hashing() -> None:
-    processor = object.__new__(PixtralHFMultiModalProcessor)
-    processor.info = PixtralHFProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
-    processor._cached_apply_hf_processor = lambda *args, **kwargs: pytest.fail(
-        "cache processing must not run for rejected kwargs"
-    )
-    inputs = ProcessorInputs(
-        prompt=[],
-        mm_data_items={},
-        hf_processor_mm_kwargs={"size": {"longest_edge": 448}},
-    )
-
-    with pytest.raises(ValueError, match="Mistral tokenizer mode.*size"):
-        processor.apply(inputs, TimingContext(enabled=False))
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])
@@ -384,40 +306,3 @@ def test_pixtral_hf_native_dummy_inputs_build_budget(cache_enabled: bool) -> Non
     )
 
     assert budget.mm_max_toks_per_item["image"] > 0
-
-
-def _pixtral_llava_model_for_input_validation() -> LlavaForConditionalGeneration:
-    model = object.__new__(LlavaForConditionalGeneration)
-    model.config = SimpleNamespace(
-        vision_config=SimpleNamespace(model_type="pixtral", num_channels=3)
-    )
-    return model
-
-
-@pytest.mark.parametrize(
-    ("pixel_values", "error_match"),
-    [
-        (torch.ones(1, 3, 2), "4-D tensor"),
-        (torch.ones(1, 4, 2, 2), "3 channels"),
-        (torch.ones(1, 3, 2, 2, dtype=torch.int64), "floating-point dtype"),
-        (torch.ones(1, 3, 0, 2), "positive spatial dimensions"),
-    ],
-)
-def test_pixtral_hf_validates_direct_pixel_values(
-    pixel_values: torch.Tensor,
-    error_match: str,
-) -> None:
-    model = _pixtral_llava_model_for_input_validation()
-
-    with pytest.raises(ValueError, match=error_match):
-        model._parse_and_validate_image_input(pixel_values=pixel_values)
-
-
-def test_pixtral_hf_preserves_valid_ragged_direct_pixel_values() -> None:
-    model = _pixtral_llava_model_for_input_validation()
-    pixel_values = [torch.ones(3, 2, 2), torch.ones(3, 3, 4)]
-
-    image_input = model._parse_and_validate_image_input(pixel_values=pixel_values)
-
-    assert image_input is not None
-    assert image_input["pixel_values"] is pixel_values

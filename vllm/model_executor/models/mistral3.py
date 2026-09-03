@@ -20,7 +20,7 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs import MultiModalDataDict, MultiModalInput
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -36,7 +36,6 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
-    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -46,7 +45,6 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
-    TimingContext,
 )
 from vllm.multimodal.processing.processor import (
     MultiModalPromptUpdates,
@@ -77,54 +75,6 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-
-
-def _validate_mistral3_pixel_values(
-    pixel_values: object,
-) -> torch.Tensor | list[torch.Tensor]:
-    field_name = "Mistral3 pixel_values"
-    if isinstance(pixel_values, torch.Tensor):
-        if pixel_values.ndim != 4:
-            raise ValueError(
-                f"{field_name} must be a 4-D tensor or a list of 3-D tensors, "
-                f"got rank {pixel_values.ndim}."
-            )
-        images = list(pixel_values.unbind(0))
-    elif isinstance(pixel_values, list):
-        if not pixel_values:
-            raise ValueError(f"{field_name} must contain at least one image.")
-        images = pixel_values
-    else:
-        raise ValueError(
-            f"{field_name} must be a 4-D tensor or a list of 3-D tensors, "
-            f"got {type(pixel_values).__name__}."
-        )
-
-    if not images:
-        raise ValueError(f"{field_name} must contain at least one image.")
-
-    for image_idx, image in enumerate(images):
-        if not isinstance(image, torch.Tensor) or image.ndim != 3:
-            rank = image.ndim if isinstance(image, torch.Tensor) else "unknown"
-            raise ValueError(
-                f"{field_name}[{image_idx}] must be a 3-D tensor, got rank {rank}."
-            )
-        if not image.is_floating_point():
-            raise ValueError(
-                f"{field_name}[{image_idx}] must use a floating-point dtype, "
-                f"got {image.dtype}."
-            )
-        if image.shape[0] != 3:
-            raise ValueError(
-                f"{field_name}[{image_idx}] must have 3 channels, got {image.shape[0]}."
-            )
-        if image.shape[-2] <= 0 or image.shape[-1] <= 0:
-            raise ValueError(
-                f"{field_name}[{image_idx}] must have positive spatial "
-                f"dimensions, got {tuple(image.shape)}."
-            )
-
-    return pixel_values
 
 
 class Mistral3ImagePixelInputs(TensorSchema):
@@ -308,12 +258,6 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         tokenizer = self.get_tokenizer()
         if is_mistral_tokenizer(tokenizer):
-            merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
-            if "size" in merged_kwargs:
-                raise ValueError(
-                    "Mistral tokenizer mode does not support `size` for Mistral3 "
-                    "vision processing."
-                )
             try:
                 processor = MistralCommonPixtralProcessor(
                     tokenizer=tokenizer,
@@ -330,17 +274,6 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
             return processor
 
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
-
-    def validate_mm_processor_kwargs(
-        self,
-        kwargs: Mapping[str, object],
-    ) -> None:
-        effective_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
-        if is_mistral_tokenizer(self.get_tokenizer()) and "size" in effective_kwargs:
-            raise ValueError(
-                "Mistral tokenizer mode does not support `size` for Mistral3 "
-                "vision processing."
-            )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -452,36 +385,6 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo])
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def __call__(
-        self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        mm_uuid_items: MultiModalUUIDItems | None = None,
-        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
-    ) -> MultiModalInput:
-        kwargs = hf_processor_mm_kwargs or {}
-        self.validate_mm_processor_kwargs(kwargs)
-        return super().__call__(
-            prompt=prompt,
-            mm_items=mm_items,
-            mm_uuid_items=mm_uuid_items,
-            hf_processor_mm_kwargs=kwargs,
-        )
-
-    def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
-    ) -> MultiModalInput:
-        self.validate_mm_processor_kwargs(inputs.hf_processor_mm_kwargs)
-        return super().apply(inputs=inputs, timing_ctx=timing_ctx)
-
-    def validate_mm_processor_kwargs(
-        self,
-        kwargs: Mapping[str, object],
-    ) -> None:
-        self.info.validate_mm_processor_kwargs(kwargs)
-
     def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -503,13 +406,6 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
             image_sizes = processed_data["image_sizes"]
-            if len(pixel_values) != len(image_sizes):
-                raise ValueError(
-                    "Mistral3 pixel_values and image_sizes must contain the "
-                    f"same number of images, got {len(pixel_values)} and "
-                    f"{len(image_sizes)}."
-                )
-
             processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]
@@ -750,8 +646,6 @@ class Mistral3ForConditionalGeneration(
 
         if pixel_values is None:
             return None
-
-        pixel_values = _validate_mistral3_pixel_values(pixel_values)
 
         return Mistral3ImagePixelInputs(
             type="pixel_values_pixtral",
