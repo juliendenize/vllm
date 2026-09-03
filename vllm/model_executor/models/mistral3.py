@@ -66,9 +66,9 @@ from .pixtral import (
     PixtralHFEncoderInfo,
     PixtralHFVisionModel,
     adapt_mistral_common_pixtral_output,
+    get_mistral_common_pixtral_dummy_inputs,
     get_mistral_common_pixtral_processor,
     get_mistral_common_pixtral_prompt_update,
-    render_mistral_common_pixtral_prompt,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -362,14 +362,11 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo])
             if mm_data is None
             else mm_data
         )
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
-        images = dummy_mm_items["image"].get_all()
-        dummy_prompt = render_mistral_common_pixtral_prompt(
+        return get_mistral_common_pixtral_dummy_inputs(
             tokenizer=self.info.get_tokenizer(),
-            images=images,
+            mm_data=dummy_mm_data,
+            parse_mm_data=self.info.parse_mm_data,
         )
-
-        return ProcessorInputs(prompt=dummy_prompt, mm_data_items=dummy_mm_items)
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):

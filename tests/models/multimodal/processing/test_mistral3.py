@@ -22,7 +22,10 @@ from vllm.model_executor.models.mistral3 import (
     Mistral3MultiModalProcessor,
     Mistral3ProcessingInfo,
 )
-from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
+from vllm.model_executor.models.pixtral import (
+    PixtralHFEncoderInfo,
+    get_mistral_common_pixtral_dummy_inputs,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -357,6 +360,21 @@ def test_mistral3_native_dummy_inputs_render_full_image_grids() -> None:
         mm_counts={"image": 2},
         mm_options={},
         mm_data={"image": images},
+    )
+
+    assert info.parse_validate is False
+    assert info.chat_tokenizer.calls == [images]
+    assert inputs.prompt == [2, 2, 3, 2, 2, 2, 2, 3]
+
+
+def test_shared_native_dummy_inputs_skip_validation() -> None:
+    info = _NativeDummyInfo()
+    images = [Image.new("RGB", (32, 32)), Image.new("RGB", (64, 32))]
+
+    inputs = get_mistral_common_pixtral_dummy_inputs(
+        tokenizer=info.get_tokenizer(),
+        mm_data={"image": images},
+        parse_mm_data=info.parse_mm_data,
     )
 
     assert info.parse_validate is False

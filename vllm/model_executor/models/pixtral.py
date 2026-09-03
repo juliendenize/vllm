@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Annotated, Literal
 
@@ -132,6 +132,22 @@ def render_mistral_common_pixtral_prompt(
     return tokenizer.mistral.encode_chat_completion(request).tokens
 
 
+def get_mistral_common_pixtral_dummy_inputs(
+    *,
+    tokenizer: object,
+    mm_data: MultiModalDataDict,
+    parse_mm_data: Callable[..., MultiModalDataItems],
+) -> ProcessorInputs:
+    mm_data_items = parse_mm_data(mm_data, validate=False)
+    images = mm_data_items["image"].get_all()
+    dummy_prompt = render_mistral_common_pixtral_prompt(
+        tokenizer=tokenizer,
+        images=images,
+    )
+
+    return ProcessorInputs(prompt=dummy_prompt, mm_data_items=mm_data_items)
+
+
 def get_mistral_common_pixtral_prompt_update(
     processor: MistralCommonPixtralProcessor,
     *,
@@ -236,7 +252,6 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
-        dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = (
             self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
             if mm_data is None
@@ -246,19 +261,10 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         dummy_images = (
             [] if "image" not in dummy_mm_data else dummy_mm_items["image"].get_all()
         )
-
-        request = ChatCompletionRequest(
-            messages=[
-                UserMessage(
-                    content=[
-                        TextChunk(text=dummy_text),
-                        *(ImageChunk(image=image) for image in dummy_images),
-                    ]
-                ),
-            ]
+        dummy_tokens = render_mistral_common_pixtral_prompt(
+            tokenizer=tokenizer,
+            images=dummy_images,
         )
-        res = tokenizer.mistral.encode_chat_completion(request)
-        dummy_tokens = res.tokens
 
         return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 
