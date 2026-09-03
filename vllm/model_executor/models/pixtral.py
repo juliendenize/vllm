@@ -252,6 +252,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
+        dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = (
             self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
             if mm_data is None
@@ -261,10 +262,18 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         dummy_images = (
             [] if "image" not in dummy_mm_data else dummy_mm_items["image"].get_all()
         )
-        dummy_tokens = render_mistral_common_pixtral_prompt(
-            tokenizer=tokenizer,
-            images=dummy_images,
+        request = ChatCompletionRequest(
+            messages=[
+                UserMessage(
+                    content=[
+                        TextChunk(text=dummy_text),
+                        *(ImageChunk(image=image) for image in dummy_images),
+                    ]
+                ),
+            ]
         )
+        res = tokenizer.mistral.encode_chat_completion(request)
+        dummy_tokens = res.tokens
 
         return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 

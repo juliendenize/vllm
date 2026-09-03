@@ -23,6 +23,7 @@ from vllm.model_executor.models.mistral3 import (
     Mistral3ProcessingInfo,
 )
 from vllm.model_executor.models.pixtral import (
+    PixtralDummyInputsBuilder,
     PixtralHFEncoderInfo,
     get_mistral_common_pixtral_dummy_inputs,
 )
@@ -106,9 +107,12 @@ class _DummyTextTokenizer:
 class _NativeChatTokenizer:
     def __init__(self) -> None:
         self.calls: list[list[Image.Image]] = []
+        self.texts: list[str] = []
 
     def encode_chat_completion(self, request: ChatCompletionRequest) -> SimpleNamespace:
-        images = [chunk.image for chunk in request.messages[0].content[1:]]
+        content = request.messages[0].content
+        self.texts.append(content[0].text)
+        images = [chunk.image for chunk in content[1:]]
         self.calls.append(images)
         tokens: list[int] = []
         for image in images:
@@ -304,7 +308,7 @@ class _NativeDummyInfo:
         self,
         mm_data: MultiModalDataDict,
         *,
-        validate: bool,
+        validate: bool = True,
     ) -> dict[str, ImageProcessorItems]:
         self.parse_validate = validate
         return {"image": ImageProcessorItems(mm_data["image"])}
@@ -365,6 +369,25 @@ def test_mistral3_native_dummy_inputs_render_full_image_grids() -> None:
     assert info.parse_validate is False
     assert info.chat_tokenizer.calls == [images]
     assert inputs.prompt == [2, 2, 3, 2, 2, 2, 2, 3]
+
+
+def test_native_pixtral_dummy_inputs_preserve_dummy_text() -> None:
+    info = _NativeDummyInfo()
+
+    class _DummyTextPixtralInputsBuilder(PixtralDummyInputsBuilder):
+        def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+            return "native dummy text"
+
+    builder = _DummyTextPixtralInputsBuilder(info)
+
+    builder.get_dummy_processor_inputs(
+        seq_len=128,
+        mm_counts={"image": 0},
+        mm_options={},
+        mm_data={"image": []},
+    )
+
+    assert info.chat_tokenizer.texts == ["native dummy text"]
 
 
 def test_shared_native_dummy_inputs_skip_validation() -> None:
