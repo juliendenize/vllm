@@ -314,13 +314,15 @@ def test_mistral3_selects_native_processor_for_mistral_tokenizer() -> None:
     assert ctx.processor_cls is None
 
 
-def test_mistral3_rejects_native_image_token_id_mismatch_at_setup() -> None:
+def test_mistral3_does_not_validate_native_image_token_id_at_setup() -> None:
     ctx = _ProcessorContext(
         _mistral_tokenizer(), hf_config=SimpleNamespace(image_token_index=99)
     )
 
-    with pytest.raises(ValueError, match="Mistral3.*image token id"):
-        Mistral3ProcessingInfo(ctx).get_hf_processor()
+    assert isinstance(
+        Mistral3ProcessingInfo(ctx).get_hf_processor(),
+        MistralCommonPixtralProcessor,
+    )
 
 
 def test_mistral3_native_vision_info_uses_image_config() -> None:
@@ -332,37 +334,32 @@ def test_mistral3_native_vision_info_uses_image_config() -> None:
 
 
 @pytest.mark.parametrize(
-    ("hf_config", "error_match"),
+    "hf_config",
     [
-        (
-            SimpleNamespace(
-                image_token_index=2,
-                vision_config=SimpleNamespace(patch_size=14),
-                spatial_merge_size=1,
-            ),
-            "Mistral3.*vision_config.patch_size",
+        SimpleNamespace(
+            image_token_index=2,
+            vision_config=SimpleNamespace(patch_size=14),
+            spatial_merge_size=1,
         ),
-        (
-            SimpleNamespace(
-                image_token_index=2,
-                vision_config=SimpleNamespace(patch_size=16),
-                spatial_merge_size=2,
-            ),
-            "Mistral3.*spatial_merge_size",
+        SimpleNamespace(
+            image_token_index=2,
+            vision_config=SimpleNamespace(patch_size=16),
+            spatial_merge_size=2,
         ),
     ],
 )
-def test_mistral3_rejects_native_image_config_mismatch_at_setup(
+def test_mistral3_does_not_validate_native_image_config_at_setup(
     hf_config: object,
-    error_match: str,
 ) -> None:
     ctx = _ProcessorContext(
         _mistral_tokenizer(image_patch_size=16, spatial_merge_size=1),
         hf_config=hf_config,
     )
 
-    with pytest.raises(ValueError, match=error_match):
-        Mistral3ProcessingInfo(ctx).get_hf_processor()
+    assert isinstance(
+        Mistral3ProcessingInfo(ctx).get_hf_processor(),
+        MistralCommonPixtralProcessor,
+    )
 
 
 def test_mistral3_keeps_hf_processor_for_hf_tokenizer() -> None:
@@ -470,73 +467,15 @@ def test_mistral3_normalizes_native_images_to_pixel_values() -> None:
     multimodal_processor.info = SimpleNamespace(
         get_hf_processor=lambda **kwargs: native_processor
     )
-    processed_data = BatchFeature({"images": [torch.ones(3, 32, 48)]})
+    native_images = [torch.ones(1, 3, 32, 48)]
+    processed_data = BatchFeature({"images": native_images})
 
     output = multimodal_processor._postprocess_hf_mm_data(
         {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
     )
 
-    assert torch.equal(output["pixel_values"][0], torch.ones(3, 32, 48))
+    assert output["pixel_values"] is native_images
     assert "images" not in output
-
-
-def test_mistral3_rejects_invalid_native_image_rank() -> None:
-    native_processor = _native_pixtral_processor()
-    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: native_processor
-    )
-
-    with pytest.raises(ValueError, match="Mistral3.*3-D tensor"):
-        multimodal_processor._postprocess_hf_mm_data(
-            {"images": [Image.new("RGB", (48, 32))]},
-            {},
-            BatchFeature({"images": [torch.ones(1, 3, 32, 48)]}),
-        )
-
-
-@pytest.mark.parametrize(
-    ("images", "error_match"),
-    [
-        ([torch.ones(4, 32, 48)], "3 channels"),
-        ([torch.ones(3, 32, 48, dtype=torch.int64)], "floating-point dtype"),
-        ([torch.ones(3, 0, 48)], "positive spatial dimensions"),
-    ],
-)
-def test_mistral3_rejects_invalid_native_image_contract(
-    images: list[torch.Tensor],
-    error_match: str,
-) -> None:
-    native_processor = _native_pixtral_processor()
-    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: native_processor
-    )
-
-    with pytest.raises(ValueError, match=error_match):
-        multimodal_processor._postprocess_hf_mm_data(
-            {"images": [Image.new("RGB", (48, 32))]},
-            {},
-            BatchFeature({"images": images}),
-        )
-
-
-def test_mistral3_rejects_native_patch_count_mismatch() -> None:
-    native_processor = _native_pixtral_processor()
-    native_processor.image_processor.get_number_of_image_patches = (
-        lambda height, width: (2, 1, 2) if (height, width) == (32, 48) else (1, 1, 1)
-    )
-    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: native_processor
-    )
-
-    with pytest.raises(ValueError, match="Mistral3 pixel_values.*patches"):
-        multimodal_processor._postprocess_hf_mm_data(
-            {"images": [Image.new("RGB", (48, 32))]},
-            {},
-            BatchFeature({"images": [torch.ones(3, 16, 16)]}),
-        )
 
 
 def test_mistral3_rejects_size_for_native_tokenizer() -> None:

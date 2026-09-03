@@ -140,17 +140,19 @@ def test_pixtral_hf_selects_native_processor_for_mistral_tokenizer() -> None:
     assert isinstance(processor, MistralCommonPixtralProcessor)
 
 
-def test_pixtral_hf_rejects_native_image_token_id_mismatch_at_setup() -> None:
+def test_pixtral_hf_does_not_validate_native_image_token_id_at_setup() -> None:
     ctx = _ProcessorContext(
         _mistral_tokenizer(), hf_config=SimpleNamespace(image_token_index=99)
     )
 
-    with pytest.raises(ValueError, match="Llava.*image token id"):
-        PixtralHFProcessingInfo(ctx).get_hf_processor()
+    assert isinstance(
+        PixtralHFProcessingInfo(ctx).get_hf_processor(),
+        MistralCommonPixtralProcessor,
+    )
 
 
 @pytest.mark.parametrize(
-    ("hf_config", "tokenizer_kwargs", "error_match"),
+    ("hf_config", "tokenizer_kwargs"),
     [
         (
             SimpleNamespace(
@@ -158,7 +160,6 @@ def test_pixtral_hf_rejects_native_image_token_id_mismatch_at_setup() -> None:
                 vision_config=SimpleNamespace(patch_size=14),
             ),
             {"image_patch_size": 16},
-            "Llava.*vision_config.patch_size",
         ),
         (
             SimpleNamespace(
@@ -166,22 +167,22 @@ def test_pixtral_hf_rejects_native_image_token_id_mismatch_at_setup() -> None:
                 vision_config=SimpleNamespace(patch_size=16),
             ),
             {"spatial_merge_size": 2},
-            "Llava.*spatial_merge_size",
         ),
     ],
 )
-def test_pixtral_hf_rejects_native_image_config_mismatch_at_setup(
+def test_pixtral_hf_does_not_validate_native_image_config_at_setup(
     hf_config: object,
     tokenizer_kwargs: dict[str, int],
-    error_match: str,
 ) -> None:
     ctx = _ProcessorContext(
         _mistral_tokenizer(**tokenizer_kwargs),
         hf_config=hf_config,
     )
 
-    with pytest.raises(ValueError, match=error_match):
-        PixtralHFProcessingInfo(ctx).get_hf_processor()
+    assert isinstance(
+        PixtralHFProcessingInfo(ctx).get_hf_processor(),
+        MistralCommonPixtralProcessor,
+    )
 
 
 def test_llava_keeps_hf_processor_for_non_pixtral_vision() -> None:
@@ -266,31 +267,15 @@ def test_pixtral_hf_normalizes_native_images_to_pixel_values() -> None:
     multimodal_processor.info = SimpleNamespace(
         get_hf_processor=lambda **kwargs: native_processor
     )
-    processed_data = BatchFeature({"images": [torch.ones(3, 32, 48)]})
+    native_images = [torch.ones(1, 3, 32, 48)]
+    processed_data = BatchFeature({"images": native_images})
 
     output = multimodal_processor._postprocess_hf_mm_data(
         {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
     )
 
-    assert output["pixel_values"][0].shape == (3, 32, 48)
+    assert output["pixel_values"] is native_images
     assert "images" not in output
-
-
-def test_pixtral_hf_rejects_invalid_native_image_count() -> None:
-    native_processor = PixtralHFProcessingInfo(
-        _ProcessorContext(_mistral_tokenizer())
-    ).get_hf_processor()
-    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: native_processor
-    )
-
-    with pytest.raises(ValueError, match="Llava.*same number of images"):
-        multimodal_processor._postprocess_hf_mm_data(
-            {"images": [Image.new("RGB", (48, 32)), Image.new("RGB", (48, 32))]},
-            {},
-            BatchFeature({"images": torch.ones(1, 3, 32, 48)}),
-        )
 
 
 def test_pixtral_hf_rejects_size_for_native_tokenizer() -> None:

@@ -81,9 +81,6 @@ from .utils import (
 
 def _validate_mistral3_pixel_values(
     pixel_values: object,
-    *,
-    source_images: object | None = None,
-    processor: MistralCommonPixtralProcessor | None = None,
 ) -> torch.Tensor | list[torch.Tensor]:
     field_name = "Mistral3 pixel_values"
     if isinstance(pixel_values, torch.Tensor):
@@ -127,62 +124,7 @@ def _validate_mistral3_pixel_values(
                 f"dimensions, got {tuple(image.shape)}."
             )
 
-    if source_images is not None:
-        if isinstance(source_images, (list, tuple)):
-            expected_count = len(source_images)
-        else:
-            expected_count = 1
-        if len(images) != expected_count:
-            raise ValueError(
-                f"{field_name} and source images must contain the same number "
-                f"of images, got {len(images)} and {expected_count}."
-            )
-
-        if processor is not None:
-            source_items = ImageProcessorItems(
-                list(source_images)
-                if isinstance(source_images, (list, tuple))
-                else [source_images]
-            )
-            for image_idx, image in enumerate(images):
-                source_size = source_items.get_image_size(image_idx)
-                source_patches = processor.image_processor.get_number_of_image_patches(
-                    height=source_size.height,
-                    width=source_size.width,
-                )[0]
-                output_patches = processor.image_processor.get_number_of_image_patches(
-                    height=image.shape[-2],
-                    width=image.shape[-1],
-                )[0]
-                if source_patches != output_patches:
-                    raise ValueError(
-                        f"{field_name}[{image_idx}] has {output_patches} image "
-                        f"patches, expected {source_patches}."
-                    )
-
     return pixel_values
-
-
-def _validate_mistral3_native_image_config(
-    processor: MistralCommonPixtralProcessor,
-    hf_config: Mistral3Config,
-) -> None:
-    image_config = processor.image_processor.mm_encoder.image_config
-    expected_patch_size = hf_config.vision_config.patch_size
-    if image_config.image_patch_size != expected_patch_size:
-        raise ValueError(
-            "Mistral3 native Pixtral processing has incompatible image patch "
-            f"size {image_config.image_patch_size}; expected architecture "
-            f"vision_config.patch_size={expected_patch_size}."
-        )
-
-    expected_spatial_merge_size = hf_config.spatial_merge_size
-    if image_config.spatial_merge_size != expected_spatial_merge_size:
-        raise ValueError(
-            "Mistral3 native Pixtral processing has incompatible "
-            f"spatial_merge_size {image_config.spatial_merge_size}; expected "
-            f"architecture spatial_merge_size={expected_spatial_merge_size}."
-        )
 
 
 class Mistral3ImagePixelInputs(TensorSchema):
@@ -385,14 +327,6 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
                     "Pixtral processor for `tokenizer_mode=mistral`."
                 ) from exc
 
-            hf_config = self.get_hf_config()
-            if processor.image_token_id != hf_config.image_token_index:
-                raise ValueError(
-                    "Mistral3 native Pixtral processing has incompatible image "
-                    f"token id {processor.image_token_id}; expected architecture "
-                    f"image_token_index={hf_config.image_token_index}."
-                )
-            _validate_mistral3_native_image_config(processor, hf_config)
             return processor
 
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
@@ -562,17 +496,7 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         if isinstance(processor, MistralCommonPixtralProcessor):
-            images = processed_data.pop("images", None)
-            if images is None:
-                raise ValueError(
-                    "Mistral3 native Pixtral processing is missing `images`; "
-                    "the native processor must return image tensors."
-                )
-            processed_data["pixel_values"] = _validate_mistral3_pixel_values(
-                images,
-                source_images=mm_data.get("images"),
-                processor=processor,
-            )
+            processed_data["pixel_values"] = processed_data.pop("images")
 
         pixel_values = processed_data.get("pixel_values")
         if pixel_values is not None and "image_sizes" in processed_data:
@@ -637,13 +561,6 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
             image_break_id = processor.image_break_id
             image_token_id = processor.image_token_id
             image_end_id = processor.image_end_id
-            if image_token_id != hf_config.image_token_index:
-                raise ValueError(
-                    "Mistral3 native Pixtral processing has incompatible image "
-                    f"token id {image_token_id}; expected architecture "
-                    f"image_token_index={hf_config.image_token_index}."
-                )
-            _validate_mistral3_native_image_config(processor, hf_config)
         else:
             vocab = tokenizer.get_vocab()
             image_break_id = vocab[processor.image_break_token]
@@ -658,18 +575,10 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
             image_size = images.get_image_size(item_idx)
 
             if isinstance(processor, MistralCommonPixtralProcessor):
-                try:
-                    _, nrows, ncols = (
-                        processor.image_processor.get_number_of_image_patches(
-                            height=image_size.height,
-                            width=image_size.width,
-                        )
-                    )
-                except (AttributeError, TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "Mistral3 native Pixtral processing cannot determine "
-                        "the image patch grid from the native image processor."
-                    ) from exc
+                _, nrows, ncols = processor.image_processor.get_number_of_image_patches(
+                    height=image_size.height,
+                    width=image_size.width,
+                )
             else:
                 ncols, nrows = encoder_info.get_patch_grid_size(
                     image_width=image_size.width,
