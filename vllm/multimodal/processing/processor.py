@@ -1066,13 +1066,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return self.apply(processor_inputs, TimingContext(enabled=False))
 
-    def validate_mm_processor_kwargs(
-        self,
-        kwargs: Mapping[str, object],
-    ) -> None:
-        """Validate request-specific multimodal processor arguments."""
-        return None
-
     @abstractmethod
     def _get_mm_fields_config(
         self,
