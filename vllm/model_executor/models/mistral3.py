@@ -259,16 +259,17 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         tokenizer = self.ctx.tokenizer
-        try:
-            processor = get_mistral_common_pixtral_processor(tokenizer)
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise ValueError(
-                "Mistral3 vision processing cannot construct the native "
-                "Pixtral processor for `tokenizer_mode=mistral`."
-            ) from exc
+        if type(self) is Mistral3ProcessingInfo:
+            try:
+                processor = get_mistral_common_pixtral_processor(tokenizer)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Mistral3 vision processing cannot construct the native "
+                    "Pixtral processor for `tokenizer_mode=mistral`."
+                ) from exc
 
-        if processor is not None:
-            return processor
+            if processor is not None:
+                return processor
 
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 

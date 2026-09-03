@@ -15,7 +15,10 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.inputs import MultiModalDataDict
-from vllm.model_executor.models.lightonocr import LightOnOCRProcessingInfo
+from vllm.model_executor.models.lightonocr import (
+    LightOnOCRMultiModalProcessor,
+    LightOnOCRProcessingInfo,
+)
 from vllm.model_executor.models.mistral3 import (
     Mistral3DummyInputsBuilder,
     Mistral3HFEncoderInfo,
@@ -71,6 +74,7 @@ class _ProcessorContext:
         )
         self.processor_cls: type[object] | None = None
         self.processor_kwargs: dict[str, object] | None = None
+        self.hf_processor: object | None = None
 
     def get_tokenizer(self) -> object:
         if self.tokenizer is None:
@@ -90,6 +94,8 @@ class _ProcessorContext:
     def get_hf_processor(self, processor_cls: type[object], **kwargs: object) -> object:
         self.processor_cls = processor_cls
         self.processor_kwargs = kwargs
+        if self.hf_processor is not None:
+            return self.hf_processor
         return SimpleNamespace(processor_cls=processor_cls, patch_size=1)
 
 
@@ -328,6 +334,37 @@ def test_mistral3_keeps_hf_processor_without_tokenizer() -> None:
 
     assert ctx.processor_cls is PixtralProcessor
     assert ctx.processor_kwargs == {"size": {"longest_edge": 448}}
+
+
+def test_lightonocr_mistral_tokenizer_keeps_hf_processor_path() -> None:
+    tokenizer = _mistral_tokenizer()
+    tokenizer._vocab_dict = {"[IMG_BREAK]": 17, "[IMG_END]": 18}
+    hf_processor = SimpleNamespace(
+        image_break_token="[IMG_BREAK]",
+        image_end_token="[IMG_END]",
+    )
+    ctx = _ProcessorContext(tokenizer)
+    ctx.hf_processor = hf_processor
+    info = LightOnOCRProcessingInfo(ctx)
+
+    assert info.get_hf_processor() is hf_processor
+    assert ctx.processor_cls is PixtralProcessor
+
+    multimodal_processor = object.__new__(LightOnOCRMultiModalProcessor)
+    multimodal_processor.info = info
+    processed_data = BatchFeature(
+        {
+            "input_ids": torch.tensor([11, 17, 2, 18, 13]),
+            "attention_mask": torch.ones(5, dtype=torch.long),
+        }
+    )
+
+    output = multimodal_processor._postprocess_hf_mm_data(
+        {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
+    )
+
+    torch.testing.assert_close(output["input_ids"], torch.tensor([[11, 2, 13]]))
+    torch.testing.assert_close(output["attention_mask"], torch.tensor([[1, 1, 1]]))
 
 
 def test_mistral3_native_dummy_inputs_render_full_image_grids() -> None:
