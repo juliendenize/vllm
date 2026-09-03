@@ -15,6 +15,7 @@ from vllm.model_executor.models.llava import (
     PixtralHFMultiModalProcessor,
     PixtralHFProcessingInfo,
 )
+from vllm.model_executor.models.pixtral import get_mistral_common_pixtral_processor
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import (
     InputProcessingContext,
@@ -135,6 +136,24 @@ def test_pixtral_hf_keeps_hf_processor_without_tokenizer() -> None:
     info.get_hf_processor()
 
     assert ctx.processor_cls is PixtralProcessor
+
+
+def test_pixtral_hf_processor_tokenizes_text_and_images() -> None:
+    processor = get_mistral_common_pixtral_processor(_mistral_tokenizer())
+    assert processor is not None
+
+    output = processor(
+        text="plain text",
+        images=[Image.new("RGB", (48, 32))],
+        return_tensors="pt",
+        add_special_tokens=True,
+    )
+
+    assert output["input_ids"] == [[11]]
+    assert output["attention_mask"] == [[1]]
+    assert output["images"][0].shape == (3, 32, 48)
+    assert output["images"][0].dtype == torch.float32
+    assert processor.tokenizer.kwargs["add_special_tokens"] is False
 
 
 def test_pixtral_hf_native_dummy_inputs_render_full_image_grids() -> None:

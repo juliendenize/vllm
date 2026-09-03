@@ -94,6 +94,9 @@ class _ProcessorContext:
 
 
 class _NativeTextTokenizer:
+    def __init__(self) -> None:
+        self.init_kwargs: dict[str, object] = {}
+
     def __call__(self, **kwargs: object) -> dict[str, object]:
         self.kwargs = kwargs
         return {"input_ids": [[11]], "attention_mask": [[1]]}
@@ -381,20 +384,16 @@ def test_shared_native_dummy_inputs_skip_validation() -> None:
     assert inputs.prompt == [2, 2, 3, 2, 2, 2, 2, 3]
 
 
-def test_native_pixtral_processor_tokenizes_text_and_images() -> None:
+def test_native_pixtral_processor_processes_images() -> None:
     processor = _native_pixtral_processor()
 
     output = processor(
-        text="plain text",
         images=[Image.new("RGB", (48, 32))],
         return_tensors="pt",
     )
 
-    assert output["input_ids"] == [[11]]
-    assert output["attention_mask"] == [[1]]
     assert output["images"][0].shape == (3, 32, 48)
     assert output["images"][0].dtype == torch.float32
-    assert processor.tokenizer.kwargs["add_special_tokens"] is False
 
 
 def test_native_pixtral_processor_accepts_image_kwargs() -> None:
