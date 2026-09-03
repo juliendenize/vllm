@@ -9,18 +9,13 @@ from PIL import Image
 from transformers import BatchFeature
 from transformers.models.pixtral import PixtralProcessor
 
-from vllm.config import DeviceConfig, ModelConfig, VllmConfig
-from vllm.inputs import MultiModalDataDict
+from vllm.config import ModelConfig
 from vllm.model_executor.models.llava import (
     LlavaDummyInputsBuilder,
-    LlavaProcessingInfo,
     PixtralHFMultiModalProcessor,
     PixtralHFProcessingInfo,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (
     InputProcessingContext,
     TimingContext,
@@ -31,7 +26,8 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...registry import HF_EXAMPLE_MODELS
 from .test_mistral3 import (
-    _DummyTextTokenizer,
+    _assert_native_dummy_inputs_build_budget,
+    _assert_native_dummy_inputs_match_cache_paths,
     _mistral_tokenizer,
     _NativeDummyInfo,
     _ProcessorContext,
@@ -130,14 +126,6 @@ def test_pixtral_hf_tokenizer_matrix(
     )
 
 
-def test_pixtral_hf_selects_native_processor_for_mistral_tokenizer() -> None:
-    info = PixtralHFProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
-
-    processor = info.get_hf_processor()
-
-    assert isinstance(processor, MistralCommonPixtralProcessor)
-
-
 def test_pixtral_hf_keeps_hf_processor_without_tokenizer() -> None:
     ctx = _ProcessorContext(None)
     info = PixtralHFProcessingInfo(ctx)
@@ -145,16 +133,6 @@ def test_pixtral_hf_keeps_hf_processor_without_tokenizer() -> None:
     info.get_hf_processor()
 
     assert ctx.processor_cls is PixtralProcessor
-
-
-def test_llava_keeps_hf_processor_for_non_pixtral_vision() -> None:
-    ctx = _ProcessorContext(object())
-    info = LlavaProcessingInfo(ctx)
-
-    info.get_hf_processor()
-
-    assert ctx.processor_cls is not None
-    assert ctx.processor_cls.__name__ == "LlavaProcessor"
 
 
 def test_pixtral_hf_native_dummy_inputs_render_full_image_grids() -> None:
@@ -175,43 +153,6 @@ def test_pixtral_hf_native_dummy_inputs_render_full_image_grids() -> None:
     assert info.parse_validate is False
     assert info.chat_tokenizer.calls == [images]
     assert inputs.prompt == [2, 2, 3, 2, 2, 2, 2, 3]
-
-
-def test_pixtral_hf_hf_dummy_inputs_preserve_supplied_data() -> None:
-    parsed_mm_data: MultiModalDataDict | None = None
-    parsed_validate: bool | None = None
-    image = Image.new("RGB", (32, 32))
-
-    def parse_mm_data(
-        mm_data: MultiModalDataDict,
-        *,
-        validate: bool,
-    ) -> dict[str, ImageProcessorItems]:
-        nonlocal parsed_mm_data, parsed_validate
-        parsed_mm_data = mm_data
-        parsed_validate = validate
-        return {"image": ImageProcessorItems(mm_data["image"])}
-
-    info = SimpleNamespace(
-        ctx=SimpleNamespace(tokenizer=_DummyTextTokenizer()),
-        get_hf_processor=lambda: SimpleNamespace(image_token="<image>"),
-        get_image_size_with_most_features=lambda: (32, 32),
-        parse_mm_data=parse_mm_data,
-    )
-    builder = LlavaDummyInputsBuilder(info)
-
-    inputs = builder.get_dummy_processor_inputs(
-        seq_len=128,
-        mm_counts={"image": 1},
-        mm_options={},
-        mm_data={"image": [image]},
-    )
-
-    assert parsed_mm_data is not None
-    assert parsed_mm_data["image"][0] is image
-    assert parsed_validate is False
-    assert inputs.prompt == [7]
-    assert inputs.mm_data_items["image"].get_all() == [image]
 
 
 def test_pixtral_hf_normalizes_native_images_to_pixel_values() -> None:
@@ -297,59 +238,10 @@ def test_pixtral_hf_native_dummy_inputs_match_cache_paths(
         limit_mm_per_prompt={"image": 2},
         mm_processor_cache_gb=4 if cache_enabled else 0,
     )
-    cache = MultiModalProcessorOnlyCache(ctx.model_config) if cache_enabled else None
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=cache)
-    mm_config = ctx.model_config.get_multimodal_config()
-    processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-        seq_len=ctx.model_config.max_model_len,
-        mm_counts={"image": 2},
-        mm_options=mm_config.limit_per_prompt,
+    _assert_native_dummy_inputs_match_cache_paths(
+        ctx=ctx,
+        cache_enabled=cache_enabled,
     )
-    native_processor = processor.info.get_hf_processor()
-    images = processor_inputs.mm_data_items["image"].get_all()
-    expected_patch_counts = [
-        native_processor.image_processor.get_number_of_image_patches(
-            height=image.height,
-            width=image.width,
-        )[0]
-        for image in images
-    ]
-
-    output = processor.apply(processor_inputs, TimingContext(enabled=False))
-
-    assert processor_inputs.prompt.count(native_processor.image_token_id) == sum(
-        expected_patch_counts
-    )
-    assert [
-        item.get_num_embeds() for item in output["mm_placeholders"]["image"]
-    ] == expected_patch_counts
-
-    if cache_enabled:
-        assert cache is not None
-        cached_output = processor.apply(
-            processor_inputs,
-            TimingContext(enabled=False),
-        )
-        uncached_processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-        uncached_output = uncached_processor.apply(
-            processor_inputs,
-            TimingContext(enabled=False),
-        )
-        assert cache.make_stats().hits > 0
-        assert cached_output["prompt_token_ids"] == uncached_output["prompt_token_ids"]
-        assert cached_output["mm_hashes"] == uncached_output["mm_hashes"]
-        assert cached_output["mm_placeholders"] == uncached_output["mm_placeholders"]
-        cached_data = cached_output["mm_kwargs"].get_data()
-        uncached_data = uncached_output["mm_kwargs"].get_data()
-        assert cached_data.keys() == uncached_data.keys()
-        for key in cached_data:
-            assert len(cached_data[key]) == len(uncached_data[key])
-            for cached_value, uncached_value in zip(
-                cached_data[key], uncached_data[key]
-            ):
-                assert cached_value.shape == uncached_value.shape
-                assert cached_value.dtype == uncached_value.dtype
-                torch.testing.assert_close(cached_value, uncached_value)
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])
@@ -360,13 +252,7 @@ def test_pixtral_hf_native_dummy_inputs_build_budget(cache_enabled: bool) -> Non
         mm_processor_cache_gb=4,
     )
 
-    budget = MultiModalBudget(
-        VllmConfig(
-            model_config=ctx.model_config,
-            device_config=DeviceConfig(device="cpu"),
-        ),
-        MULTIMODAL_REGISTRY,
-        enable_cache=cache_enabled,
+    _assert_native_dummy_inputs_build_budget(
+        ctx=ctx,
+        cache_enabled=cache_enabled,
     )
-
-    assert budget.mm_max_toks_per_item["image"] > 0

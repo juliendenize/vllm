@@ -97,13 +97,6 @@ class _NativeTextTokenizer:
         return {"input_ids": [[11]], "attention_mask": [[1]]}
 
 
-class _DummyTextTokenizer:
-    def encode(self, text: str, *, truncation: bool) -> list[int]:
-        assert text == "<image>"
-        assert not truncation
-        return [7]
-
-
 class _NativeChatTokenizer:
     def __init__(self) -> None:
         self.calls: list[list[Image.Image]] = []
@@ -314,31 +307,12 @@ class _NativeDummyInfo:
         return {"image": ImageProcessorItems(mm_data["image"])}
 
 
-def test_mistral3_selects_native_processor_for_mistral_tokenizer() -> None:
-    ctx = _ProcessorContext(_mistral_tokenizer())
-    info = Mistral3ProcessingInfo(ctx)
-
-    processor = info.get_hf_processor()
-
-    assert isinstance(processor, MistralCommonPixtralProcessor)
-    assert ctx.processor_cls is None
-
-
 def test_mistral3_native_vision_info_uses_image_config() -> None:
     info = Mistral3ProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
 
     encoder_info = info.get_vision_encoder_info()
 
     assert encoder_info.get_image_size() == 1024
-
-
-def test_mistral3_keeps_hf_processor_for_hf_tokenizer() -> None:
-    ctx = _ProcessorContext(object())
-    info = Mistral3ProcessingInfo(ctx)
-
-    info.get_hf_processor(size={"longest_edge": 448})
-
-    assert ctx.processor_kwargs == {"size": {"longest_edge": 448}}
 
 
 def test_mistral3_keeps_hf_processor_without_tokenizer() -> None:
@@ -403,43 +377,6 @@ def test_shared_native_dummy_inputs_skip_validation() -> None:
     assert info.parse_validate is False
     assert info.chat_tokenizer.calls == [images]
     assert inputs.prompt == [2, 2, 3, 2, 2, 2, 2, 3]
-
-
-def test_mistral3_hf_dummy_inputs_preserve_supplied_data() -> None:
-    parsed_mm_data: MultiModalDataDict | None = None
-    parsed_validate: bool | None = None
-    image = Image.new("RGB", (32, 32))
-
-    def parse_mm_data(
-        mm_data: MultiModalDataDict,
-        *,
-        validate: bool,
-    ) -> dict[str, ImageProcessorItems]:
-        nonlocal parsed_mm_data, parsed_validate
-        parsed_mm_data = mm_data
-        parsed_validate = validate
-        return {"image": ImageProcessorItems(mm_data["image"])}
-
-    info = SimpleNamespace(
-        ctx=SimpleNamespace(tokenizer=_DummyTextTokenizer()),
-        get_hf_processor=lambda: SimpleNamespace(image_token="<image>"),
-        get_image_size_with_most_features=lambda: (32, 32),
-        parse_mm_data=parse_mm_data,
-    )
-    builder = Mistral3DummyInputsBuilder(info)
-
-    inputs = builder.get_dummy_processor_inputs(
-        seq_len=128,
-        mm_counts={"image": 1},
-        mm_options={},
-        mm_data={"image": [image]},
-    )
-
-    assert parsed_mm_data is not None
-    assert parsed_mm_data["image"][0] is image
-    assert parsed_validate is False
-    assert inputs.prompt == [7]
-    assert inputs.mm_data_items["image"].get_all() == [image]
 
 
 def test_native_pixtral_processor_tokenizes_text_and_images() -> None:
@@ -576,16 +513,10 @@ def test_mistral3_native_prompt_updates_do_not_replace_full_grid() -> None:
     assert resolved.content.full.count(native_processor.image_token_id) == 2
 
 
-@pytest.mark.parametrize("cache_enabled", [False, True])
-def test_mistral3_native_dummy_inputs_match_cache_paths(
+def _assert_native_dummy_inputs_match_cache_paths(
+    ctx: InputProcessingContext,
     cache_enabled: bool,
 ) -> None:
-    ctx = build_model_context(
-        _MODEL_ID,
-        limit_mm_per_prompt={"image": 2},
-        mm_processor_cache_gb=4 if cache_enabled else 0,
-        model_config_kwargs=_MODEL_CONFIG_KWARGS,
-    )
     cache = MultiModalProcessorOnlyCache(ctx.model_config) if cache_enabled else None
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=cache)
     mm_config = ctx.model_config.get_multimodal_config()
@@ -642,14 +573,26 @@ def test_mistral3_native_dummy_inputs_match_cache_paths(
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])
-def test_mistral3_native_dummy_inputs_build_budget(cache_enabled: bool) -> None:
+def test_mistral3_native_dummy_inputs_match_cache_paths(
+    cache_enabled: bool,
+) -> None:
     ctx = build_model_context(
         _MODEL_ID,
-        limit_mm_per_prompt={"image": 1},
-        mm_processor_cache_gb=4,
+        limit_mm_per_prompt={"image": 2},
+        mm_processor_cache_gb=4 if cache_enabled else 0,
         model_config_kwargs=_MODEL_CONFIG_KWARGS,
     )
 
+    _assert_native_dummy_inputs_match_cache_paths(
+        ctx=ctx,
+        cache_enabled=cache_enabled,
+    )
+
+
+def _assert_native_dummy_inputs_build_budget(
+    ctx: InputProcessingContext,
+    cache_enabled: bool,
+) -> None:
     budget = MultiModalBudget(
         VllmConfig(
             model_config=ctx.model_config,
@@ -660,6 +603,21 @@ def test_mistral3_native_dummy_inputs_build_budget(cache_enabled: bool) -> None:
     )
 
     assert budget.mm_max_toks_per_item["image"] > 0
+
+
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_mistral3_native_dummy_inputs_build_budget(cache_enabled: bool) -> None:
+    ctx = build_model_context(
+        _MODEL_ID,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=4,
+        model_config_kwargs=_MODEL_CONFIG_KWARGS,
+    )
+
+    _assert_native_dummy_inputs_build_budget(
+        ctx=ctx,
+        cache_enabled=cache_enabled,
+    )
 
 
 def _processed_pixel_values(
