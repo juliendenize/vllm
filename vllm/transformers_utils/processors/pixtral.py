@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import torch
 from mistral_common.protocol.instruct.chunk import ImageChunk
+from mistral_common.tokens.tokenizers.base import (
+    SpecialTokens,
+)
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
 from transformers import BatchFeature, ImageProcessingMixin, ProcessorMixin, TensorType
@@ -81,9 +85,9 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
 
 
 class MistralCommonPixtralHFProcessor(MistralCommonPixtralProcessor):
-    image_token = "[IMG]"
-    image_break_token = "[IMG_BREAK]"
-    image_end_token = "[IMG_END]"
+    image_token = SpecialTokens.img.value
+    image_break_token = SpecialTokens.img_break.value
+    image_end_token = SpecialTokens.img_end.value
 
     def __call__(
         self,

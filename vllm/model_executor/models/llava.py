@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
-import torch.nn as nn
+from torch import nn
 from transformers import (
     BatchFeature,
     CLIPVisionConfig,
@@ -236,11 +236,11 @@ _I = TypeVar("_I", bound=BaseLlavaProcessingInfo)
 
 class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
-
         processor = self.info.get_hf_processor()
         if isinstance(processor, MistralCommonPixtralProcessor):
             return ""
+
+        num_images = mm_counts.get("image", 0)
 
         image_token = processor.image_token
 
@@ -272,37 +272,16 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions],
-        mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
         processor = self.info.get_hf_processor()
         if not isinstance(processor, MistralCommonPixtralProcessor):
-            if mm_data is not None:
-                dummy_mm_items = self.info.parse_mm_data(mm_data, validate=False)
-                tokenizer = self.info.ctx.tokenizer
-                dummy_prompt = (
-                    []
-                    if tokenizer is None
-                    else tokenizer.encode(
-                        self.get_dummy_text(mm_counts),
-                        truncation=False,
-                    )
-                )
-                return ProcessorInputs(
-                    prompt=dummy_prompt,
-                    mm_data_items=dummy_mm_items,
-                )
-
             return super().get_dummy_processor_inputs(
                 seq_len=seq_len,
                 mm_counts=mm_counts,
                 mm_options=mm_options,
             )
 
-        dummy_mm_data = (
-            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-            if mm_data is None
-            else mm_data
-        )
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         return get_mistral_common_pixtral_dummy_inputs(
             tokenizer=self.info.get_tokenizer(),
             mm_data=dummy_mm_data,
@@ -463,6 +442,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
         if isinstance(processor, MistralCommonPixtralProcessor):
 
             def get_replacement(item_idx: int):
@@ -485,6 +465,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
         hf_config = self.info.get_hf_config()
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
+
         image_break_id = vocab[processor.image_break_token]
         image_token_id = hf_config.image_token_index
         image_end_id = vocab[processor.image_end_token]
@@ -495,6 +476,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
+
             ncols, nrows = encoder_info.get_patch_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
@@ -662,7 +644,7 @@ class LlavaForConditionalGeneration(
         )
 
         # NOTE: These are special cases for Pixtral-12B in the HF-format
-        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
+        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json
         if (
             config.text_config.architectures is None
             and config.text_config.model_type == "mistral"

@@ -30,15 +30,22 @@ from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
+    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 _I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
 
 class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
+    def __init__(self, ctx: InputProcessingContext) -> None:
+        super().__init__(ctx)
+        if is_mistral_tokenizer(ctx.tokenizer):
+            raise ValueError("LightOnOCR does not support Mistral tokenizer mode.")
+
     def get_vision_encoder_info(
         self,
         mm_processor_kwargs: Mapping[str, object] | None = None,
