@@ -26,8 +26,6 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...registry import HF_EXAMPLE_MODELS
 from .test_mistral3 import (
-    _CACHE_CASES,
-    _TOKENIZER_PROCESSOR_CASES,
     _assert_hf_crops_pixel_values_to_image_sizes,
     _assert_hf_rejects_pixel_values_image_sizes_mismatch,
     _assert_hf_requires_image_sizes_for_pixel_values,
@@ -81,7 +79,11 @@ def _build_pixtral_context(
 
 @pytest.mark.parametrize(
     ("tokenizer_mode", "processor_type"),
-    _TOKENIZER_PROCESSOR_CASES,
+    [
+        pytest.param("hf", PixtralProcessor, id="hf-pixtral"),
+        pytest.param("mistral", MistralCommonPixtralHFProcessor, id="mistral"),
+        pytest.param("auto", MistralCommonPixtralHFProcessor, id="auto"),
+    ],
 )
 def test_pixtral_hf_tokenizer_matrix(
     tokenizer_mode: str,
@@ -206,7 +208,10 @@ def test_pixtral_hf_native_prompt_updates_skip_hf_state() -> None:
     )
 
 
-@pytest.mark.parametrize("cache_enabled", _CACHE_CASES)
+@pytest.mark.parametrize(
+    "cache_enabled",
+    [pytest.param(False, id="cache-off"), pytest.param(True, id="cache-on")],
+)
 def test_pixtral_hf_native_dummy_inputs_match_cache_paths(
     cache_enabled: bool,
 ) -> None:
@@ -221,7 +226,10 @@ def test_pixtral_hf_native_dummy_inputs_match_cache_paths(
     )
 
 
-@pytest.mark.parametrize("cache_enabled", _CACHE_CASES)
+@pytest.mark.parametrize(
+    "cache_enabled",
+    [pytest.param(False, id="cache-off"), pytest.param(True, id="cache-on")],
+)
 def test_pixtral_hf_native_dummy_inputs_build_budget(cache_enabled: bool) -> None:
     ctx = _build_pixtral_context(
         tokenizer_mode="mistral",

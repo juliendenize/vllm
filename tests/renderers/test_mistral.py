@@ -9,16 +9,17 @@ from unittest.mock import Mock
 
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import DeviceConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.renderers import ChatParams, renderer_from_config
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralHFProcessor
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..models.multimodal.processing.test_mistral3 import (
-    _TOKENIZER_PROCESSOR_CASES,
     _assert_tokenizer_processor_case,
 )
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -64,7 +65,11 @@ class MockVllmConfig:
 
 @pytest.mark.parametrize(
     ("tokenizer_mode", "processor_type"),
-    _TOKENIZER_PROCESSOR_CASES,
+    [
+        pytest.param("hf", PixtralProcessor, id="hf-pixtral"),
+        pytest.param("mistral", MistralCommonPixtralHFProcessor, id="mistral"),
+        pytest.param("auto", MistralCommonPixtralHFProcessor, id="auto"),
+    ],
 )
 def test_hf_mistral3_renderer_tokenizer_matrix(
     tokenizer_mode: str,

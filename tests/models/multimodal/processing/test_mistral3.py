@@ -57,12 +57,6 @@ pytestmark = pytest.mark.skip_global_cleanup
 _MODEL_CONFIG_KWARGS = {"config_format": "hf"}
 _MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
-_TOKENIZER_PROCESSOR_CASES = [
-    pytest.param("hf", PixtralProcessor, id="hf-pixtral"),
-    pytest.param("mistral", MistralCommonPixtralHFProcessor, id="mistral"),
-    pytest.param("auto", MistralCommonPixtralHFProcessor, id="auto"),
-]
-_CACHE_CASES = [pytest.param(False, id="off"), pytest.param(True, id="on")]
 
 
 def _assert_tokenizer_processor_case(
@@ -220,7 +214,11 @@ def _build_mistral3_processing_context(
 
 @pytest.mark.parametrize(
     ("tokenizer_mode", "processor_type"),
-    _TOKENIZER_PROCESSOR_CASES,
+    [
+        pytest.param("hf", PixtralProcessor, id="hf-pixtral"),
+        pytest.param("mistral", MistralCommonPixtralHFProcessor, id="mistral"),
+        pytest.param("auto", MistralCommonPixtralHFProcessor, id="auto"),
+    ],
 )
 def test_mistral3_hf_format_tokenizer_matrix(
     tokenizer_mode: str,
@@ -670,7 +668,10 @@ def _assert_native_dummy_inputs_match_cache_paths(
                 torch.testing.assert_close(cached_value, uncached_value)
 
 
-@pytest.mark.parametrize("cache_enabled", _CACHE_CASES)
+@pytest.mark.parametrize(
+    "cache_enabled",
+    [pytest.param(False, id="cache-off"), pytest.param(True, id="cache-on")],
+)
 def test_mistral3_native_dummy_inputs_match_cache_paths(
     cache_enabled: bool,
 ) -> None:
@@ -703,7 +704,10 @@ def _assert_native_dummy_inputs_build_budget(
     assert budget.mm_max_toks_per_item["image"] > 0
 
 
-@pytest.mark.parametrize("cache_enabled", _CACHE_CASES)
+@pytest.mark.parametrize(
+    "cache_enabled",
+    [pytest.param(False, id="cache-off"), pytest.param(True, id="cache-on")],
+)
 def test_mistral3_native_dummy_inputs_build_budget(cache_enabled: bool) -> None:
     ctx = build_model_context(
         _MODEL_ID,
