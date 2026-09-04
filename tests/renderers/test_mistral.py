@@ -9,16 +9,18 @@ from unittest.mock import Mock
 
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
-from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import DeviceConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.renderers import ChatParams, renderer_from_config
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralHFProcessor
 from vllm.utils.mistral import is_mistral_tokenizer
 
+from ..models.multimodal.processing.test_mistral3 import (
+    _TOKENIZER_PROCESSOR_CASES,
+    _assert_tokenizer_processor_case,
+)
 from ..models.registry import HF_EXAMPLE_MODELS
 
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
@@ -61,16 +63,11 @@ class MockVllmConfig:
 
 
 @pytest.mark.parametrize(
-    ("tokenizer_mode", "uses_mistral_tokenizer", "processor_type"),
-    [
-        ("hf", False, PixtralProcessor),
-        ("mistral", True, MistralCommonPixtralHFProcessor),
-        ("auto", True, MistralCommonPixtralHFProcessor),
-    ],
+    ("tokenizer_mode", "processor_type"),
+    _TOKENIZER_PROCESSOR_CASES,
 )
 def test_hf_mistral3_renderer_tokenizer_matrix(
     tokenizer_mode: str,
-    uses_mistral_tokenizer: bool,
     processor_type: type[object],
 ) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(HF_MISTRAL3_MODEL_NAME)
@@ -106,9 +103,13 @@ def test_hf_mistral3_renderer_tokenizer_matrix(
         assert type(renderer) is HfRenderer
     else:
         assert type(renderer) is MistralRenderer
-    assert is_mistral_tokenizer(renderer.tokenizer) == uses_mistral_tokenizer
     assert renderer.mm_processor is not None
-    assert type(renderer.mm_processor.info.get_hf_processor()) is processor_type
+    _assert_tokenizer_processor_case(
+        tokenizer_mode=tokenizer_mode,
+        actual_uses_mistral_tokenizer=is_mistral_tokenizer(renderer.tokenizer),
+        processor=renderer.mm_processor.info.get_hf_processor(),
+        expected_processor_type=processor_type,
+    )
 
 
 @pytest.mark.asyncio

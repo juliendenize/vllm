@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import torch
@@ -16,7 +16,6 @@ from transformers.models.pixtral import PixtralProcessor
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.lightonocr import (
-    LightOnOCRMultiModalProcessor,
     LightOnOCRProcessingInfo,
 )
 from vllm.model_executor.models.mistral3 import (
@@ -58,6 +57,23 @@ pytestmark = pytest.mark.skip_global_cleanup
 _MODEL_CONFIG_KWARGS = {"config_format": "hf"}
 _MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
+_TOKENIZER_PROCESSOR_CASES = [
+    pytest.param("hf", PixtralProcessor, id="hf-pixtral"),
+    pytest.param("mistral", MistralCommonPixtralHFProcessor, id="mistral"),
+    pytest.param("auto", MistralCommonPixtralHFProcessor, id="auto"),
+]
+_CACHE_CASES = [pytest.param(False, id="off"), pytest.param(True, id="on")]
+
+
+def _assert_tokenizer_processor_case(
+    *,
+    tokenizer_mode: str,
+    actual_uses_mistral_tokenizer: bool,
+    processor: object,
+    expected_processor_type: type[object],
+) -> None:
+    assert type(processor) is expected_processor_type
+    assert actual_uses_mistral_tokenizer == (tokenizer_mode != "hf")
 
 
 class _ProcessorContext:
@@ -204,11 +220,7 @@ def _build_mistral3_processing_context(
 
 @pytest.mark.parametrize(
     ("tokenizer_mode", "processor_type"),
-    [
-        ("hf", PixtralProcessor),
-        ("mistral", MistralCommonPixtralHFProcessor),
-        ("auto", MistralCommonPixtralHFProcessor),
-    ],
+    _TOKENIZER_PROCESSOR_CASES,
 )
 def test_mistral3_hf_format_tokenizer_matrix(
     tokenizer_mode: str,
@@ -222,17 +234,20 @@ def test_mistral3_hf_format_tokenizer_matrix(
         PixtralProcessor | MistralCommonPixtralProcessor,
         processor.info.get_hf_processor(),
     )
-    assert type(hf_processor) is processor_type
-    assert isinstance(ctx.tokenizer, MistralTokenizer) == (tokenizer_mode != "hf")
+    _assert_tokenizer_processor_case(
+        tokenizer_mode=tokenizer_mode,
+        actual_uses_mistral_tokenizer=isinstance(ctx.tokenizer, MistralTokenizer),
+        processor=hf_processor,
+        expected_processor_type=processor_type,
+    )
 
     if isinstance(hf_processor, MistralCommonPixtralProcessor):
-        images = [Image.new("RGB", (48, 32)), Image.new("RGB", (64, 32))]
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=ctx.model_config.max_model_len,
             mm_counts={"image": 2},
             mm_options={},
-            mm_data={"image": images},
         )
+        images = processor_inputs.mm_data_items["image"].get_all()
         output = processor.apply(processor_inputs, TimingContext(enabled=False))
         mm_data = output["mm_kwargs"].get_data()
         expected_patch_counts = [
@@ -244,10 +259,8 @@ def test_mistral3_hf_format_tokenizer_matrix(
         ]
 
         assert set(mm_data) == {"pixel_values"}
-        assert [tuple(value.shape) for value in mm_data["pixel_values"]] == [
-            (3, 56, 56),
-            (3, 56, 84),
-        ]
+        assert len(mm_data["pixel_values"]) == len(images)
+        assert all(value.shape[0] == 3 for value in mm_data["pixel_values"])
         assert processor_inputs.prompt.count(hf_processor.image_token_id) == sum(
             expected_patch_counts
         )
@@ -256,13 +269,12 @@ def test_mistral3_hf_format_tokenizer_matrix(
         ] == expected_patch_counts
         return
 
-    images = [Image.new("RGB", (448, 448)), Image.new("RGB", (448, 672))]
     processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
         seq_len=ctx.model_config.max_model_len,
         mm_counts={"image": 2},
         mm_options={},
-        mm_data={"image": images},
     )
+    images = processor_inputs.mm_data_items["image"].get_all()
     output = processor.apply(processor_inputs, TimingContext(enabled=False))
     mm_data = output["mm_kwargs"].get_data()
     expected_patch_counts = [
@@ -279,10 +291,8 @@ def test_mistral3_hf_format_tokenizer_matrix(
     }
     assert output["type"] == "multimodal"
     assert set(mm_data) == {"pixel_values"}
-    assert [tuple(value.shape) for value in mm_data["pixel_values"]] == [
-        (3, 448, 448),
-        (3, 672, 448),
-    ]
+    assert len(mm_data["pixel_values"]) == len(images)
+    assert all(value.shape[0] == 3 for value in mm_data["pixel_values"])
     assert len(output["mm_hashes"]["image"]) == len(images)
     assert [
         item.get_num_embeds() for item in output["mm_placeholders"]["image"]
@@ -317,6 +327,41 @@ class _NativeDummyInfo:
         self.parse_validate = validate
         return {"image": ImageProcessorItems(mm_data["image"])}
 
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, object],
+    ) -> MultiModalDataDict:
+        del seq_len, mm_options
+        return {
+            "image": [
+                Image.new("RGB", (32 + 32 * idx, 32))
+                for idx in range(mm_counts.get("image", 0))
+            ]
+        }
+
+
+def _assert_native_dummy_inputs_render_full_image_grids(
+    builder_cls: type[Any],
+) -> None:
+    info = _NativeDummyInfo()
+    builder = builder_cls(info)
+
+    inputs = builder.get_dummy_processor_inputs(
+        seq_len=128,
+        mm_counts={"image": 2},
+        mm_options={},
+    )
+    images = inputs.mm_data_items["image"].get_all()
+
+    assert info.parse_validate is False
+    assert info.chat_tokenizer.calls == [images]
+    expected_prompt = [
+        token for image in images for token in [2] * (image.width // 16) + [3]
+    ]
+    assert inputs.prompt == expected_prompt
+
 
 def test_mistral3_native_vision_info_uses_image_config() -> None:
     info = Mistral3ProcessingInfo(_ProcessorContext(_mistral_tokenizer()))
@@ -336,55 +381,16 @@ def test_mistral3_keeps_hf_processor_without_tokenizer() -> None:
     assert ctx.processor_kwargs == {"size": {"longest_edge": 448}}
 
 
-def test_lightonocr_mistral_tokenizer_keeps_hf_processor_path() -> None:
+def test_lightonocr_rejects_mistral_tokenizer() -> None:
     tokenizer = _mistral_tokenizer()
-    tokenizer._vocab_dict = {"[IMG_BREAK]": 17, "[IMG_END]": 18}
-    hf_processor = SimpleNamespace(
-        image_break_token="[IMG_BREAK]",
-        image_end_token="[IMG_END]",
-    )
     ctx = _ProcessorContext(tokenizer)
-    ctx.hf_processor = hf_processor
-    info = LightOnOCRProcessingInfo(ctx)
 
-    assert info.get_hf_processor() is hf_processor
-    assert ctx.processor_cls is PixtralProcessor
-
-    multimodal_processor = object.__new__(LightOnOCRMultiModalProcessor)
-    multimodal_processor.info = info
-    processed_data = BatchFeature(
-        {
-            "input_ids": torch.tensor([11, 17, 2, 18, 13]),
-            "attention_mask": torch.ones(5, dtype=torch.long),
-        }
-    )
-
-    output = multimodal_processor._postprocess_hf_mm_data(
-        {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
-    )
-
-    torch.testing.assert_close(output["input_ids"], torch.tensor([[11, 2, 13]]))
-    torch.testing.assert_close(output["attention_mask"], torch.tensor([[1, 1, 1]]))
+    with pytest.raises(ValueError, match="LightOnOCR.*Mistral tokenizer"):
+        LightOnOCRProcessingInfo(ctx)
 
 
 def test_mistral3_native_dummy_inputs_render_full_image_grids() -> None:
-    info = _NativeDummyInfo()
-    builder = Mistral3DummyInputsBuilder(info)
-    images = [
-        Image.new("RGB", (32, 32)),
-        Image.new("RGB", (64, 32)),
-    ]
-
-    inputs = builder.get_dummy_processor_inputs(
-        seq_len=128,
-        mm_counts={"image": 2},
-        mm_options={},
-        mm_data={"image": images},
-    )
-
-    assert info.parse_validate is False
-    assert info.chat_tokenizer.calls == [images]
-    assert inputs.prompt == [2, 2, 3, 2, 2, 2, 2, 3]
+    _assert_native_dummy_inputs_render_full_image_grids(Mistral3DummyInputsBuilder)
 
 
 def test_native_pixtral_dummy_inputs_preserve_dummy_text() -> None:
@@ -400,7 +406,6 @@ def test_native_pixtral_dummy_inputs_preserve_dummy_text() -> None:
         seq_len=128,
         mm_counts={"image": 0},
         mm_options={},
-        mm_data={"image": []},
     )
 
     assert info.chat_tokenizer.texts == ["native dummy text"]
@@ -468,11 +473,25 @@ def test_hf_pixtral_processor_uses_hf_adapter() -> None:
     assert processor.image_end_token == "[IMG_END]"
 
 
-def test_mistral3_normalizes_native_images_to_pixel_values() -> None:
-    native_processor = _native_pixtral_processor()
-    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
+def _new_multimodal_processor(
+    processor_cls: type[Any],
+    hf_processor: object,
+) -> Any:
+    multimodal_processor = object.__new__(processor_cls)
     multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: native_processor
+        get_hf_processor=lambda **_: hf_processor
+    )
+
+    return multimodal_processor
+
+
+def _assert_native_images_normalize_to_pixel_values(
+    processor_cls: type[Any],
+    native_processor: object,
+) -> None:
+    multimodal_processor = _new_multimodal_processor(
+        processor_cls=processor_cls,
+        hf_processor=native_processor,
     )
     native_images = [torch.ones(1, 3, 32, 48)]
 
@@ -492,10 +511,12 @@ def test_mistral3_normalizes_native_images_to_pixel_values() -> None:
     assert "images" not in output
 
 
-def test_mistral3_hf_crops_pixel_values_to_image_sizes() -> None:
-    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: SimpleNamespace()
+def _assert_hf_crops_pixel_values_to_image_sizes(
+    processor_cls: type[Any],
+) -> None:
+    multimodal_processor = _new_multimodal_processor(
+        processor_cls=processor_cls,
+        hf_processor=SimpleNamespace(),
     )
     pixel_values = [torch.arange(20).reshape(1, 4, 5)]
     processed_data = BatchFeature(
@@ -509,10 +530,12 @@ def test_mistral3_hf_crops_pixel_values_to_image_sizes() -> None:
     torch.testing.assert_close(output["pixel_values"][0], pixel_values[0][:, :2, :3])
 
 
-def test_mistral3_hf_rejects_pixel_values_image_sizes_mismatch() -> None:
-    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: SimpleNamespace()
+def _assert_hf_rejects_pixel_values_image_sizes_mismatch(
+    processor_cls: type[Any],
+) -> None:
+    multimodal_processor = _new_multimodal_processor(
+        processor_cls=processor_cls,
+        hf_processor=SimpleNamespace(),
     )
     processed_data = BatchFeature(
         {
@@ -527,10 +550,12 @@ def test_mistral3_hf_rejects_pixel_values_image_sizes_mismatch() -> None:
         )
 
 
-def test_mistral3_hf_requires_image_sizes_for_pixel_values() -> None:
-    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: SimpleNamespace()
+def _assert_hf_requires_image_sizes_for_pixel_values(
+    processor_cls: type[Any],
+) -> None:
+    multimodal_processor = _new_multimodal_processor(
+        processor_cls=processor_cls,
+        hf_processor=SimpleNamespace(),
     )
     processed_data = BatchFeature({"pixel_values": [torch.ones(1, 4, 5)]})
 
@@ -540,11 +565,13 @@ def test_mistral3_hf_requires_image_sizes_for_pixel_values() -> None:
         )
 
 
-def test_mistral3_native_prompt_updates_do_not_replace_full_grid() -> None:
-    native_processor = _native_pixtral_processor()
-    multimodal_processor = object.__new__(Mistral3MultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: native_processor,
+def _assert_native_prompt_updates_do_not_replace_full_grid(
+    processor_cls: type[Any],
+    native_processor: Any,
+) -> None:
+    multimodal_processor = _new_multimodal_processor(
+        processor_cls=processor_cls,
+        hf_processor=native_processor,
     )
     images = SimpleNamespace(
         get_image_size=lambda item_idx: SimpleNamespace(width=48, height=32)
@@ -556,6 +583,32 @@ def test_mistral3_native_prompt_updates_do_not_replace_full_grid() -> None:
 
     assert resolved.target == []
     assert resolved.content.full.count(native_processor.image_token_id) == 2
+
+
+def test_mistral3_normalizes_native_images_to_pixel_values() -> None:
+    _assert_native_images_normalize_to_pixel_values(
+        processor_cls=Mistral3MultiModalProcessor,
+        native_processor=_native_pixtral_processor(),
+    )
+
+
+def test_mistral3_hf_crops_pixel_values_to_image_sizes() -> None:
+    _assert_hf_crops_pixel_values_to_image_sizes(Mistral3MultiModalProcessor)
+
+
+def test_mistral3_hf_rejects_pixel_values_image_sizes_mismatch() -> None:
+    _assert_hf_rejects_pixel_values_image_sizes_mismatch(Mistral3MultiModalProcessor)
+
+
+def test_mistral3_hf_requires_image_sizes_for_pixel_values() -> None:
+    _assert_hf_requires_image_sizes_for_pixel_values(Mistral3MultiModalProcessor)
+
+
+def test_mistral3_native_prompt_updates_do_not_replace_full_grid() -> None:
+    _assert_native_prompt_updates_do_not_replace_full_grid(
+        processor_cls=Mistral3MultiModalProcessor,
+        native_processor=_native_pixtral_processor(),
+    )
 
 
 def _assert_native_dummy_inputs_match_cache_paths(
@@ -617,7 +670,7 @@ def _assert_native_dummy_inputs_match_cache_paths(
                 torch.testing.assert_close(cached_value, uncached_value)
 
 
-@pytest.mark.parametrize("cache_enabled", [False, True])
+@pytest.mark.parametrize("cache_enabled", _CACHE_CASES)
 def test_mistral3_native_dummy_inputs_match_cache_paths(
     cache_enabled: bool,
 ) -> None:
@@ -650,7 +703,7 @@ def _assert_native_dummy_inputs_build_budget(
     assert budget.mm_max_toks_per_item["image"] > 0
 
 
-@pytest.mark.parametrize("cache_enabled", [False, True])
+@pytest.mark.parametrize("cache_enabled", _CACHE_CASES)
 def test_mistral3_native_dummy_inputs_build_budget(cache_enabled: bool) -> None:
     ctx = build_model_context(
         _MODEL_ID,

@@ -214,7 +214,10 @@ def test_chat(
 
 
 @large_gpu_test(min_gb=80)
-@pytest.mark.parametrize("tokenizer_mode", ["hf", "mistral"])
+@pytest.mark.parametrize(
+    "tokenizer_mode",
+    [pytest.param("hf", id="hf"), pytest.param("mistral", id="mistral")],
+)
 def test_hf_format_chat_tokenizer_matrix(
     vllm_runner,
     tokenizer_mode: str,

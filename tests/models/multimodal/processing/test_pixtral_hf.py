@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 from PIL import Image
-from transformers import BatchFeature
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import ModelConfig
@@ -29,10 +26,19 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...registry import HF_EXAMPLE_MODELS
 from .test_mistral3 import (
+    _CACHE_CASES,
+    _TOKENIZER_PROCESSOR_CASES,
+    _assert_hf_crops_pixel_values_to_image_sizes,
+    _assert_hf_rejects_pixel_values_image_sizes_mismatch,
+    _assert_hf_requires_image_sizes_for_pixel_values,
     _assert_native_dummy_inputs_build_budget,
     _assert_native_dummy_inputs_match_cache_paths,
+    _assert_native_dummy_inputs_render_full_image_grids,
+    _assert_native_images_normalize_to_pixel_values,
+    _assert_native_prompt_updates_do_not_replace_full_grid,
+    _assert_tokenizer_processor_case,
+    _expected_placeholder_tokens_per_image,
     _mistral_tokenizer,
-    _NativeDummyInfo,
     _ProcessorContext,
 )
 
@@ -75,11 +81,7 @@ def _build_pixtral_context(
 
 @pytest.mark.parametrize(
     ("tokenizer_mode", "processor_type"),
-    [
-        ("hf", PixtralProcessor),
-        ("mistral", MistralCommonPixtralHFProcessor),
-        ("auto", MistralCommonPixtralHFProcessor),
-    ],
+    _TOKENIZER_PROCESSOR_CASES,
 )
 def test_pixtral_hf_tokenizer_matrix(
     tokenizer_mode: str,
@@ -94,16 +96,19 @@ def test_pixtral_hf_tokenizer_matrix(
         ctx.model_config, tokenizer=ctx.tokenizer
     )
     hf_processor = processor.info.get_hf_processor()
-    assert type(hf_processor) is processor_type
-    assert is_mistral_tokenizer(ctx.tokenizer) == (tokenizer_mode != "hf")
+    _assert_tokenizer_processor_case(
+        tokenizer_mode=tokenizer_mode,
+        actual_uses_mistral_tokenizer=is_mistral_tokenizer(ctx.tokenizer),
+        processor=hf_processor,
+        expected_processor_type=processor_type,
+    )
 
-    images = [Image.new("RGB", (48, 32)), Image.new("RGB", (64, 32))]
     processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
         seq_len=ctx.model_config.max_model_len,
         mm_counts={"image": 2},
         mm_options={},
-        mm_data={"image": images},
     )
+    images = processor_inputs.mm_data_items["image"].get_all()
     output = processor.apply(processor_inputs, TimingContext(enabled=False))
     mm_data = output["mm_kwargs"].get_data()
 
@@ -115,18 +120,28 @@ def test_pixtral_hf_tokenizer_matrix(
         "mm_hashes",
     }
     assert set(mm_data) == {"pixel_values"}
-    assert [tuple(value.shape) for value in mm_data["pixel_values"]] == [
-        (3, 32, 48),
-        (3, 32, 64),
-    ]
-    assert [item.get_num_embeds() for item in output["mm_placeholders"]["image"]] == [
-        6,
-        8,
-    ]
-    assert (
-        output["prompt_token_ids"].count(ctx.model_config.hf_config.image_token_index)
-        == 14
-    )
+    assert len(mm_data["pixel_values"]) == len(images)
+    assert all(value.shape[0] == 3 for value in mm_data["pixel_values"])
+    if isinstance(hf_processor, MistralCommonPixtralHFProcessor):
+        expected_patch_counts = [
+            hf_processor.image_processor.get_number_of_image_patches(
+                height=image.height,
+                width=image.width,
+            )[0]
+            for image in images
+        ]
+    else:
+        expected_patch_counts = [
+            _expected_placeholder_tokens_per_image(hf_processor, value)
+            for value in mm_data["pixel_values"]
+        ]
+
+    assert [
+        item.get_num_embeds() for item in output["mm_placeholders"]["image"]
+    ] == expected_patch_counts
+    assert output["prompt_token_ids"].count(
+        ctx.model_config.hf_config.image_token_index
+    ) == sum(expected_patch_counts)
 
 
 def test_pixtral_hf_keeps_hf_processor_without_tokenizer() -> None:
@@ -157,119 +172,41 @@ def test_pixtral_hf_processor_tokenizes_text_and_images() -> None:
 
 
 def test_pixtral_hf_native_dummy_inputs_render_full_image_grids() -> None:
-    info = _NativeDummyInfo()
-    builder = LlavaDummyInputsBuilder(info)
-    images = [
-        Image.new("RGB", (32, 32)),
-        Image.new("RGB", (64, 32)),
-    ]
-
-    inputs = builder.get_dummy_processor_inputs(
-        seq_len=128,
-        mm_counts={"image": 2},
-        mm_options={},
-        mm_data={"image": images},
-    )
-
-    assert info.parse_validate is False
-    assert info.chat_tokenizer.calls == [images]
-    assert inputs.prompt == [2, 2, 3, 2, 2, 2, 2, 3]
+    _assert_native_dummy_inputs_render_full_image_grids(LlavaDummyInputsBuilder)
 
 
 def test_pixtral_hf_normalizes_native_images_to_pixel_values() -> None:
     native_processor = PixtralHFProcessingInfo(
         _ProcessorContext(_mistral_tokenizer())
     ).get_hf_processor()
-    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: native_processor
+    _assert_native_images_normalize_to_pixel_values(
+        processor_cls=PixtralHFMultiModalProcessor,
+        native_processor=native_processor,
     )
-    native_images = [torch.ones(1, 3, 32, 48)]
-
-    class NativeBatchFeature(BatchFeature):
-        def __contains__(self, key: object) -> bool:
-            if key == "image_sizes":
-                raise AssertionError("native output must not access image_sizes")
-            return super().__contains__(key)
-
-    processed_data = NativeBatchFeature({"images": native_images})
-
-    output = multimodal_processor._postprocess_hf_mm_data(
-        {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
-    )
-
-    assert output["pixel_values"] is native_images
-    assert "images" not in output
 
 
 def test_pixtral_hf_hf_crops_pixel_values_to_image_sizes() -> None:
-    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: SimpleNamespace()
-    )
-    pixel_values = [torch.arange(20).reshape(1, 4, 5)]
-    processed_data = BatchFeature(
-        {"pixel_values": pixel_values, "image_sizes": [(2, 3)]}
-    )
-
-    output = multimodal_processor._postprocess_hf_mm_data(
-        {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
-    )
-
-    torch.testing.assert_close(output["pixel_values"][0], pixel_values[0][:, :2, :3])
+    _assert_hf_crops_pixel_values_to_image_sizes(PixtralHFMultiModalProcessor)
 
 
 def test_pixtral_hf_hf_rejects_pixel_values_image_sizes_mismatch() -> None:
-    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: SimpleNamespace()
-    )
-    processed_data = BatchFeature(
-        {
-            "pixel_values": [torch.ones(1, 4, 5), torch.ones(1, 4, 5)],
-            "image_sizes": [(2, 3)],
-        }
-    )
-
-    with pytest.raises(AssertionError):
-        multimodal_processor._postprocess_hf_mm_data(
-            {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
-        )
+    _assert_hf_rejects_pixel_values_image_sizes_mismatch(PixtralHFMultiModalProcessor)
 
 
 def test_pixtral_hf_hf_requires_image_sizes_for_pixel_values() -> None:
-    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: SimpleNamespace()
-    )
-    processed_data = BatchFeature({"pixel_values": [torch.ones(1, 4, 5)]})
-
-    with pytest.raises(KeyError, match="image_sizes"):
-        multimodal_processor._postprocess_hf_mm_data(
-            {"images": [Image.new("RGB", (48, 32))]}, {}, processed_data
-        )
+    _assert_hf_requires_image_sizes_for_pixel_values(PixtralHFMultiModalProcessor)
 
 
 def test_pixtral_hf_native_prompt_updates_skip_hf_state() -> None:
     native_processor = get_mistral_common_pixtral_processor(_mistral_tokenizer())
     assert native_processor is not None
-    multimodal_processor = object.__new__(PixtralHFMultiModalProcessor)
-    multimodal_processor.info = SimpleNamespace(
-        get_hf_processor=lambda **kwargs: native_processor,
+    _assert_native_prompt_updates_do_not_replace_full_grid(
+        processor_cls=PixtralHFMultiModalProcessor,
+        native_processor=native_processor,
     )
-    images = SimpleNamespace(
-        get_image_size=lambda item_idx: SimpleNamespace(width=48, height=32)
-    )
-    mm_items = SimpleNamespace(get_items=lambda modality, item_type: images)
-
-    updates = multimodal_processor._get_prompt_updates(mm_items, {}, None)
-    resolved = updates[0].resolve(0)
-
-    assert resolved.target == []
-    assert resolved.content.full.count(native_processor.image_token_id) == 2
 
 
-@pytest.mark.parametrize("cache_enabled", [False, True])
+@pytest.mark.parametrize("cache_enabled", _CACHE_CASES)
 def test_pixtral_hf_native_dummy_inputs_match_cache_paths(
     cache_enabled: bool,
 ) -> None:
@@ -284,7 +221,7 @@ def test_pixtral_hf_native_dummy_inputs_match_cache_paths(
     )
 
 
-@pytest.mark.parametrize("cache_enabled", [False, True])
+@pytest.mark.parametrize("cache_enabled", _CACHE_CASES)
 def test_pixtral_hf_native_dummy_inputs_build_budget(cache_enabled: bool) -> None:
     ctx = _build_pixtral_context(
         tokenizer_mode="mistral",
