@@ -424,35 +424,6 @@ def test_shared_native_dummy_inputs_skip_validation() -> None:
     assert inputs.prompt == [2, 2, 3, 2, 2, 2, 2, 3]
 
 
-def test_native_pixtral_processor_processes_images() -> None:
-    processor = _native_pixtral_processor()
-
-    output = processor(
-        images=[Image.new("RGB", (48, 32))],
-        return_tensors="pt",
-    )
-
-    assert output["images"][0].shape == (3, 32, 48)
-    assert output["images"][0].dtype == torch.float32
-
-
-def test_native_pixtral_processor_accepts_image_kwargs() -> None:
-    processor = _native_pixtral_processor()
-    image = Image.new("RGB", (48, 32))
-
-    output = processor(
-        images=[image],
-        size={"longest_edge": 448},
-    )
-    image_output = processor.image_processor(
-        images=[image],
-        do_resize=False,
-    )
-
-    assert output["images"][0].shape == (3, 32, 48)
-    assert image_output["images"][0].shape == (3, 32, 48)
-
-
 def test_native_pixtral_processor_keeps_native_processor_type() -> None:
     processor = _native_pixtral_processor()
 

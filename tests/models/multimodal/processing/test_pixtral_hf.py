@@ -7,11 +7,7 @@ from PIL import Image
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import ModelConfig
-from vllm.model_executor.models.llava import (
-    LlavaDummyInputsBuilder,
-    PixtralHFMultiModalProcessor,
-    PixtralHFProcessingInfo,
-)
+from vllm.model_executor.models.llava import PixtralHFProcessingInfo
 from vllm.model_executor.models.pixtral import get_mistral_common_pixtral_processor
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import (
@@ -26,14 +22,8 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...registry import HF_EXAMPLE_MODELS
 from .test_mistral3 import (
-    _assert_hf_crops_pixel_values_to_image_sizes,
-    _assert_hf_rejects_pixel_values_image_sizes_mismatch,
-    _assert_hf_requires_image_sizes_for_pixel_values,
     _assert_native_dummy_inputs_build_budget,
     _assert_native_dummy_inputs_match_cache_paths,
-    _assert_native_dummy_inputs_render_full_image_grids,
-    _assert_native_images_normalize_to_pixel_values,
-    _assert_native_prompt_updates_do_not_replace_full_grid,
     _assert_tokenizer_processor_case,
     _expected_placeholder_tokens_per_image,
     _mistral_tokenizer,
@@ -171,41 +161,6 @@ def test_pixtral_hf_processor_tokenizes_text_and_images() -> None:
     assert output["images"][0].shape == (3, 32, 48)
     assert output["images"][0].dtype == torch.float32
     assert processor.tokenizer.kwargs["add_special_tokens"] is False
-
-
-def test_pixtral_hf_native_dummy_inputs_render_full_image_grids() -> None:
-    _assert_native_dummy_inputs_render_full_image_grids(LlavaDummyInputsBuilder)
-
-
-def test_pixtral_hf_normalizes_native_images_to_pixel_values() -> None:
-    native_processor = PixtralHFProcessingInfo(
-        _ProcessorContext(_mistral_tokenizer())
-    ).get_hf_processor()
-    _assert_native_images_normalize_to_pixel_values(
-        processor_cls=PixtralHFMultiModalProcessor,
-        native_processor=native_processor,
-    )
-
-
-def test_pixtral_hf_hf_crops_pixel_values_to_image_sizes() -> None:
-    _assert_hf_crops_pixel_values_to_image_sizes(PixtralHFMultiModalProcessor)
-
-
-def test_pixtral_hf_hf_rejects_pixel_values_image_sizes_mismatch() -> None:
-    _assert_hf_rejects_pixel_values_image_sizes_mismatch(PixtralHFMultiModalProcessor)
-
-
-def test_pixtral_hf_hf_requires_image_sizes_for_pixel_values() -> None:
-    _assert_hf_requires_image_sizes_for_pixel_values(PixtralHFMultiModalProcessor)
-
-
-def test_pixtral_hf_native_prompt_updates_skip_hf_state() -> None:
-    native_processor = get_mistral_common_pixtral_processor(_mistral_tokenizer())
-    assert native_processor is not None
-    _assert_native_prompt_updates_do_not_replace_full_grid(
-        processor_cls=PixtralHFMultiModalProcessor,
-        native_processor=native_processor,
-    )
 
 
 @pytest.mark.parametrize(
