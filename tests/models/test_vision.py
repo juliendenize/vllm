@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import math
 
 import pytest
@@ -12,6 +13,9 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.models.kimi_k25_vit import (
+    Learnable2DInterpPosEmbDivided_fixed,
+)
 from vllm.model_executor.models.vision import (
     get_load_balance_assignment,
     resolve_visual_encoder_outputs,
@@ -21,7 +25,7 @@ from vllm.model_executor.models.vision import (
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 
 pytestmark = pytest.mark.cpu_test
 
@@ -40,9 +44,7 @@ pytestmark = pytest.mark.cpu_test
 def test_resolve_visual_encoder_outputs(
     select_layers, num_layers_loaded, max_possible_layers, expected_features
 ):
-    """
-    Test that offsets are correctly handled for vision feature layers.
-    """
+    """Test that offsets are correctly handled for vision feature layers."""
     encoder_outputs = [torch.tensor([idx]) for idx in range(num_layers_loaded + 1)]
     output_tensor = resolve_visual_encoder_outputs(
         encoder_outputs=encoder_outputs,
@@ -93,15 +95,13 @@ def test_run_dp_sharded_vision_model(batch_size: int):
 def run_dp_sharded_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_vision_model produces the same results as
+    """Test that run_dp_sharded_vision_model produces the same results as
     calling the model directly.
     """
-
     # Set random seed for reproducibility
     set_random_seed(0)
 
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -281,13 +281,12 @@ def test_run_dp_sharded_mrope_vision_model(batch_size: int):
 def run_dp_sharded_mrope_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_mrope_vision_model produces the same results as
+    """Test that run_dp_sharded_mrope_vision_model produces the same results as
     calling the model directly.
     """
     # Set random seed for reproducibility
     set_random_seed(0)
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -364,7 +363,7 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
 ):
     """Test run_dp_sharded_mrope_vision_model with empty input."""
     # Set up distributed environment
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -413,7 +412,7 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
     """Test run_dp_sharded_mrope_vision_model with uneven load distribution."""
     # Set up distributed environment
     set_random_seed(123)
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -492,3 +491,23 @@ def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
 
     assert output.shape[0] == expected_output_patches
     assert output.shape[1] == vision_model.out_hidden_size
+
+
+@pytest.mark.parametrize("t", [1, 2, 4])
+def test_pos_emb_keeps_dtype_for_video_chunks(t: int):
+    """Video chunks (t > 1) add the float32 `time_weight` buffer; the output
+    must keep the tower's dtype even when the tower is not cast after
+    construction (e.g. ModelOpt-quantized checkpoints)."""
+    height, width, dim = 4, 4, 8
+    with set_default_torch_dtype(torch.bfloat16):
+        pos_emb = Learnable2DInterpPosEmbDivided_fixed(
+            height=height, width=width, num_frames=4, dim=dim
+        )
+    assert pos_emb.weight.dtype == torch.bfloat16
+    assert pos_emb.time_weight.dtype == torch.float32
+
+    cast_pos_emb = copy.deepcopy(pos_emb).to(torch.bfloat16)
+
+    x = torch.zeros(t * height * width, dim, dtype=torch.bfloat16)
+    grid = [[t, height, width]]
+    torch.testing.assert_close(pos_emb(x, grid), cast_pos_emb(x, grid), rtol=0, atol=0)
